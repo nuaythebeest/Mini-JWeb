@@ -697,6 +697,21 @@ function parseVirtualChassisPorts(text) {
   return ports;
 }
 
+function parseVirtualChassisStatus(text) {
+  const output = outputText(text).trim();
+  const normalized = output.toLowerCase();
+  let mode = "unknown";
+  if (/\bhgoe\b|high\s+gigabit\s+ethernet/i.test(output)) {
+    mode = "hgoe";
+  } else if (/\bhigig\b|hi-gig|high-gig/i.test(output)) {
+    mode = "higig";
+  }
+  return {
+    mode,
+    raw: output
+  };
+}
+
 function parseChassisHardwarePorts(text, existingPorts = []) {
   const output = outputText(text);
   const existingNames = new Set(existingPorts.map((port) => physicalName(port.name)));
@@ -859,12 +874,13 @@ function parseShowVlans(text, configVlanMap) {
 
 async function getDeviceSnapshot(connection) {
   return openNetconfSession(connection, async ({ send, close }) => {
-    const [interfacesTerse, configuration, chassisHardware, opticsDiagnostics, virtualChassisPortsOutput, vlanAttempt, staticRouteConfigAttempt] = await Promise.all([
+    const [interfacesTerse, configuration, chassisHardware, opticsDiagnostics, virtualChassisPortsOutput, virtualChassisStatusOutput, vlanAttempt, staticRouteConfigAttempt] = await Promise.all([
       send(rpc("show-interfaces-terse", '<get-interface-information format="text"><terse/></get-interface-information>')),
       send(rpc("configuration", "<get-configuration><configuration><interfaces/><vlans/><protocols/><chassis/><system/><routing-instances/><access/><forwarding-options/></configuration></get-configuration>")),
       send(commandRpc("show-chassis-hardware", "show chassis hardware")).catch(() => ""),
       send(commandRpc("show-interfaces-diagnostics-optics", "show interfaces diagnostics optics")).catch(() => ""),
       send(commandRpc("show-virtual-chassis-vc-port", "show virtual-chassis vc-port")).catch(() => ""),
+      send(commandRpc("show-virtual-chassis-status", "show virtual-chassis status")).catch(() => ""),
       send(rpc("show-vlan", '<get-vlan-information format="text"/>')).catch((error) => error),
       send(rpc("static-route-config", '<get-configuration database="committed" format="set"><configuration><routing-options/><routing-instances/></configuration></get-configuration>')).catch(() => "")
     ]);
@@ -885,6 +901,7 @@ async function getDeviceSnapshot(connection) {
     const chassisPorts = parseChassisHardwarePorts(chassisHardware, tersePorts);
     const optics = parseOpticsDiagnostics(opticsDiagnostics);
     const virtualChassisPorts = parseVirtualChassisPorts(virtualChassisPortsOutput);
+    const virtualChassis = parseVirtualChassisStatus(virtualChassisStatusOutput);
     const vcpByKey = new Map(virtualChassisPorts.map((port) => [port.key, port]));
     const ports = [...tersePorts, ...chassisPorts]
       .map((port) => {
@@ -901,6 +918,7 @@ async function getDeviceSnapshot(connection) {
     return {
       ports,
       virtualChassisPorts,
+      virtualChassis,
       vlans,
       configuredInterfaces: Array.from(interfaceConfigs.values())
         .filter((item) => (item.portType !== "unknown" || item.aeBundle) && item.name === physicalName(item.name) && !/^ae\d+$/i.test(item.name))

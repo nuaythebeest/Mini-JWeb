@@ -110,19 +110,67 @@ const nav = [
 const forwardingClasses = ["", "best-effort", "assured-forwarding", "expedited-forwarding", "network-control"];
 const bridgePriorities = Array.from({ length: 16 }, (_, index) => String(index * 4096));
 const credentialsStorageKey = "mini-jweb-ex-connection";
+const deviceProfilesStorageKey = "mini-jweb-ex-device-profiles";
+
+function blankConnection() {
+  return { host: "", port: "830", username: "", password: "", remember: false };
+}
+
+function normalizeConnectionProfile(profile = {}) {
+  return {
+    host: String(profile.host || "").trim(),
+    port: String(profile.port || "830").trim() || "830",
+    username: String(profile.username || "").trim(),
+    password: String(profile.password || ""),
+    remember: Boolean(profile.remember)
+  };
+}
+
+function profileKey(profile = {}) {
+  const normalized = normalizeConnectionProfile(profile);
+  return `${normalized.username}@${normalized.host}:${normalized.port}`;
+}
+
+function profileLabel(profile = {}) {
+  const normalized = normalizeConnectionProfile(profile);
+  return `${normalized.host || "No host"}:${normalized.port || "830"}${normalized.username ? ` (${normalized.username})` : ""}`;
+}
+
+function loadDeviceProfiles() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(deviceProfilesStorageKey) || "[]");
+    return Array.isArray(stored)
+      ? stored.map(normalizeConnectionProfile).filter((item) => item.host)
+      : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+function saveDeviceProfiles(profiles) {
+  localStorage.setItem(deviceProfilesStorageKey, JSON.stringify(profiles.map(normalizeConnectionProfile).filter((item) => item.host)));
+}
+
+function upsertDeviceProfile(profiles, profile) {
+  const normalized = normalizeConnectionProfile({ ...profile, remember: true });
+  if (!normalized.host) {
+    return profiles;
+  }
+  const key = profileKey(normalized);
+  const next = profiles.filter((item) => profileKey(item) !== key);
+  return [normalized, ...next].slice(0, 12);
+}
 
 function initialConnection() {
+  const profiles = loadDeviceProfiles();
+  if (profiles.length > 0) {
+    return profiles[0];
+  }
   try {
     const stored = JSON.parse(localStorage.getItem(credentialsStorageKey) || "{}");
-    return {
-      host: stored.host || "",
-      port: stored.port || "830",
-      username: stored.username || "",
-      password: stored.password || "",
-      remember: Boolean(stored.remember)
-    };
+    return normalizeConnectionProfile(stored);
   } catch (_error) {
-    return { host: "", port: "830", username: "", password: "", remember: false };
+    return blankConnection();
   }
 }
 
@@ -308,10 +356,64 @@ function groupFrontPanelPorts(frontPanelPorts) {
         .sort(([a], [b]) => Number(a) - Number(b))
         .map(([pic, items]) => ({
           pic,
-          items: items.sort(portTileOrder),
+          rows: [
+            items.sort(portTileOrder).filter((item) => Number(item.parts.port) % 2 === 0),
+            items.sort(portTileOrder).filter((item) => Number(item.parts.port) % 2 !== 0)
+          ].filter((row) => row.length > 0),
           layout: pic === "0" && items.length > 16 ? "access" : "uplink"
         }))
     }));
+}
+
+function virtualChassisModeLabel(snapshot) {
+  const mode = String(snapshot?.virtualChassis?.mode || "").toLowerCase();
+  if (mode === "hgoe") {
+    return "HGoE";
+  }
+  if (mode === "higig") {
+    return "HiGig / Non-HGoE";
+  }
+  return "Unknown";
+}
+
+function eligibleVcPortsForModel(deviceInfo, deviceSnapshot) {
+  const model = String(deviceInfo?.model || "").toLowerCase();
+  const ports = (deviceSnapshot?.ports || [])
+    .filter((port) => /^(ge|mge|xe|et)-/i.test(port.name || ""))
+    .map((port) => {
+      const parts = portParts(port.name);
+      return {
+        key: `${parts.fpc}/${parts.pic}/${parts.port}`,
+        name: physicalInterfaceName(port.name),
+        fpc: parts.fpc,
+        picSlot: parts.pic,
+        port: parts.port,
+        prefix: parts.prefix
+      };
+    });
+  const unique = Array.from(new Map(ports.map((port) => [port.key, port])).values())
+    .sort((a, b) => Number(a.fpc) - Number(b.fpc) || Number(a.picSlot) - Number(b.picSlot) || Number(a.port) - Number(b.port));
+
+  if (/^ex2300/.test(model)) {
+    return unique.filter((port) => port.picSlot === "1" && ["0", "1"].includes(port.port));
+  }
+  if (/^ex4100|^ex4400/.test(model)) {
+    const uplinks = unique.filter((port) => port.picSlot !== "0");
+    if (uplinks.length > 0) {
+      return uplinks;
+    }
+    if (/^ex4100/.test(model)) {
+      return ["1", "2"].flatMap((picSlot) => ["0", "1", "2", "3"].map((port) => ({
+        key: `0/${picSlot}/${port}`,
+        name: `uplink-0/${picSlot}/${port}`,
+        fpc: "0",
+        picSlot,
+        port,
+        prefix: "xe"
+      })));
+    }
+  }
+  return unique.filter((port) => port.picSlot !== "0" && ["xe", "et"].includes(port.prefix));
 }
 
 function configLabel(config) {
@@ -684,53 +786,8 @@ function DataTable({ columns, children }) {
   );
 }
 
-function ConnectionPanel({ connection, setConnection, deviceInfo, setDeviceInfo, setDeviceSnapshot, setConfig, config, setActive }) {
-  const [status, setStatus] = useState("");
-  const [busy, setBusy] = useState(false);
+function ConnectionPanel({ connection, setConnection, deviceInfo, connectToSwitch, disconnectFromDevice, connectionStatus, connectionBusy }) {
   const connected = Boolean(deviceInfo?.ok);
-
-  async function connect() {
-    setBusy(true);
-    setStatus("Connecting with NETCONF...");
-    try {
-      const result = await window.miniJweb.inspectDevice(connection);
-      setDeviceInfo(result);
-      if (result.ok) {
-        if (connection.remember) {
-          localStorage.setItem(credentialsStorageKey, JSON.stringify({
-            host: connection.host,
-            port: connection.port,
-            username: connection.username,
-            password: connection.password,
-            remember: true
-          }));
-        } else {
-          localStorage.removeItem(credentialsStorageKey);
-        }
-        setStatus("Connected. Loading current interfaces and VLANs...");
-        const snapshot = await window.miniJweb.getSnapshot(connection);
-        setDeviceSnapshot(snapshot);
-        setConfig(configFromSnapshot(snapshot, defaultConfig));
-        setStatus("Connected. Current interfaces and VLANs loaded from the switch.");
-        setActive("dashboard");
-      } else {
-        setStatus("Connected, but device verification found warnings.");
-      }
-    } catch (error) {
-      setDeviceInfo(null);
-      setStatus(error.message || "Connection failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function disconnect() {
-    setDeviceInfo(null);
-    setDeviceSnapshot(null);
-    setConfig(defaultConfig);
-    setActive("deviceAccess");
-    setStatus("Disconnected. Enter the next switch details when ready.");
-  }
 
   return (
     <div className="connection-panel">
@@ -751,16 +808,16 @@ function ConnectionPanel({ connection, setConnection, deviceInfo, setDeviceInfo,
         Remember credentials on this computer
       </label>
       <div className="connection-actions">
-        <button className="primary" onClick={connect} disabled={busy}>
+        <button className="primary" onClick={() => connectToSwitch(connection)} disabled={connectionBusy}>
           <Lock size={16} />
-          {busy ? "Connecting" : connected ? "Connected" : "Connect"}
+          {connectionBusy ? "Connecting" : connected ? "Connected" : "Connect"}
         </button>
-        <button onClick={disconnect} disabled={busy || !deviceInfo}>
+        <button onClick={disconnectFromDevice} disabled={connectionBusy || !deviceInfo}>
           <LogOut size={16} />
           Disconnect
         </button>
       </div>
-      <p className="status-text">{status || (connection.remember ? "Credentials will be saved locally on this computer." : "Connect to the switch with NETCONF over SSH. Credentials are not saved.")}</p>
+      <p className="status-text">{connectionStatus || (connection.remember ? "Credentials will be saved locally on this computer." : "Connect to the switch with NETCONF over SSH. Credentials are not saved.")}</p>
       {deviceInfo ? (
         <div className={deviceInfo.ok ? "device-good" : "device-warn"}>
           <strong>{deviceInfo.model || "Unknown model"}</strong>
@@ -835,19 +892,20 @@ function DeviceAccess({ connectionProps }) {
   );
 }
 
-function VirtualChassis({ deviceInfo, connection }) {
+function VirtualChassis({ deviceInfo, connection, deviceSnapshot }) {
   const hgoe = hgoeEligibility(deviceInfo);
   const connected = Boolean(deviceInfo?.ok);
   const statusClass = hgoe.eligible ? "ok" : hgoe.supported ? "warn" : "alert";
   const versionText = connected ? hgoe.release || "Unknown" : "Connect to a switch";
   const requirementText = hgoe.minimum ? `Junos OS ${hgoe.minimum} or later` : hgoe.supported ? "Model default support" : "Unsupported or unknown";
-  const [picSlot, setPicSlot] = useState("1");
-  const [vcPort, setVcPort] = useState("0");
+  const eligiblePorts = useMemo(() => eligibleVcPortsForModel(deviceInfo, deviceSnapshot), [deviceInfo, deviceSnapshot]);
+  const [selectedPortKey, setSelectedPortKey] = useState("");
+  const selectedPort = eligiblePorts.find((port) => port.key === selectedPortKey) || eligiblePorts[0] || null;
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const canRunHgoeMode = connected && hgoe.eligible && !busy;
   const canRunHigigMode = connected && hgoe.supported && !busy;
-  const canRunAnyVcAction = connected && !busy;
+  const canRunAnyVcAction = connected && selectedPort && !busy;
   const canRunPerPortVcAction = connected && hgoe.eligible && !busy;
 
   async function runVcAction({ action, confirmText, pendingText }) {
@@ -886,6 +944,10 @@ function VirtualChassis({ deviceInfo, connection }) {
           <div className={`vc-status-card ${statusClass}`}>
             <span>HGoE readiness</span>
             <strong>{hgoe.eligible ? "Ready" : hgoe.supported ? "Upgrade required" : "Not supported"}</strong>
+          </div>
+          <div className="vc-status-card">
+            <span>Current VC mode</span>
+            <strong>{virtualChassisModeLabel(deviceSnapshot)}</strong>
           </div>
         </div>
         <div className={hgoe.eligible ? "guidance-panel success" : "warning-panel"}>
@@ -963,24 +1025,19 @@ function VirtualChassis({ deviceInfo, connection }) {
           </div>
 
           <div className="vc-action-card">
-            <span>HGoE per-port conversion</span>
+            <span>Eligible port conversion</span>
             <strong>Selected PIC and port</strong>
-            <p>In HGoE mode, convert one eligible uplink port between network and VCP without changing the whole group.</p>
+            <p>Only ports detected as valid VCP-capable uplinks for this model are shown. EX2300-C models show PIC 1 port 0 and 1 only.</p>
             <div className="vc-port-picker">
               <label>
-                PIC Slot
-                <select value={picSlot} onChange={(event) => setPicSlot(event.target.value)}>
-                  <option value="1">PIC 1</option>
-                  <option value="2">PIC 2</option>
-                </select>
-              </label>
-              <label>
-                Port
-                <select value={vcPort} onChange={(event) => setVcPort(event.target.value)}>
-                  <option value="0">0</option>
-                  <option value="1">1</option>
-                  <option value="2">2</option>
-                  <option value="3">3</option>
+                Eligible port
+                <select value={selectedPort?.key || ""} onChange={(event) => setSelectedPortKey(event.target.value)} disabled={eligiblePorts.length === 0}>
+                  {eligiblePorts.map((port) => (
+                    <option key={port.key} value={port.key}>
+                      {port.name} - PIC {port.picSlot} port {port.port}
+                    </option>
+                  ))}
+                  {eligiblePorts.length === 0 ? <option value="">No eligible ports detected</option> : null}
                 </select>
               </label>
             </div>
@@ -988,8 +1045,8 @@ function VirtualChassis({ deviceInfo, connection }) {
               <button
                 disabled={!canRunAnyVcAction}
                 onClick={() => runVcAction({
-                  action: { type: "virtualChassisPort", operation: "set", picSlot, port: vcPort },
-                  confirmText: `Convert PIC ${picSlot} port ${vcPort} to VCP?\n\nCommand:\nrequest virtual-chassis vc-port set pic-slot ${picSlot} port ${vcPort}`,
+                  action: { type: "virtualChassisPort", operation: "set", picSlot: selectedPort.picSlot, port: selectedPort.port },
+                  confirmText: `Convert ${selectedPort.name} to VCP?\n\nCommand:\nrequest virtual-chassis vc-port set pic-slot ${selectedPort.picSlot} port ${selectedPort.port}`,
                   pendingText: "Converting selected port to VCP..."
                 })}
               >
@@ -998,8 +1055,8 @@ function VirtualChassis({ deviceInfo, connection }) {
               <button
                 disabled={!canRunAnyVcAction}
                 onClick={() => runVcAction({
-                  action: { type: "virtualChassisPort", operation: "delete", picSlot, port: vcPort },
-                  confirmText: `Convert PIC ${picSlot} port ${vcPort} to network port?\n\nCommand:\nrequest virtual-chassis vc-port delete pic-slot ${picSlot} port ${vcPort}`,
+                  action: { type: "virtualChassisPort", operation: "delete", picSlot: selectedPort.picSlot, port: selectedPort.port },
+                  confirmText: `Convert ${selectedPort.name} to network port?\n\nCommand:\nrequest virtual-chassis vc-port delete pic-slot ${selectedPort.picSlot} port ${selectedPort.port}`,
                   pendingText: "Converting selected port to network..."
                 })}
               >
@@ -1062,18 +1119,22 @@ function Ports({ config, setConfig, deviceSnapshot, connection, setDeviceSnapsho
                   <div key={`${group.fpc}-${picGroup.pic}`} className="pic-row">
                     <div className="pic-label">PIC {picGroup.pic}</div>
                     <div className={`front-panel ${picGroup.layout === "access" ? "access-panel" : "uplink-panel"}`}>
-                      {picGroup.items.map(({ name, port, parts }) => {
-                        const oper = port?.operStatus || "unknown";
-                        const fullConfigSummary = configFullLabel(port?.config);
-                        const prefix = portParts(name).prefix;
-                        const vcpSummary = port?.vcp ? `VCP: ${[port.vcp.type, port.vcp.status, port.vcp.speed, port.vcp.neighbor].filter(Boolean).join(" ")}` : "";
-                        return (
-                          <div key={name} className={`front-port ${prefix} ${port?.vcp ? "vcp" : ""} ${oper === "up" ? "up" : oper === "down" ? "down" : oper === "absent" ? "absent" : ""}`} title={`${name}\n${port?.synthetic ? "Port slot from chassis hardware\n" : ""}${vcpSummary ? `${vcpSummary}\n` : ""}${fullConfigSummary}\n${opticsLabel(port?.optics)}`}>
-                            <span>{parts.port}</span>
-                            {port?.vcp ? <small>VCP</small> : null}
-                          </div>
-                        );
-                      })}
+                      {picGroup.rows.map((row, rowIndex) => (
+                        <div key={`${group.fpc}-${picGroup.pic}-${rowIndex}`} className="front-panel-line">
+                          {row.map(({ name, port, parts }) => {
+                            const oper = port?.operStatus || "unknown";
+                            const fullConfigSummary = configFullLabel(port?.config);
+                            const prefix = portParts(name).prefix;
+                            const vcpSummary = port?.vcp ? `VCP: ${[port.vcp.type, port.vcp.status, port.vcp.speed, port.vcp.neighbor].filter(Boolean).join(" ")}` : "";
+                            return (
+                              <div key={name} className={`front-port ${prefix} ${port?.vcp ? "vcp" : ""} ${oper === "up" ? "up" : oper === "down" ? "down" : oper === "absent" ? "absent" : ""}`} title={`${name}\n${port?.synthetic ? "Port slot from chassis hardware\n" : ""}${vcpSummary ? `${vcpSummary}\n` : ""}${fullConfigSummary}\n${opticsLabel(port?.optics)}`}>
+                                <span>{parts.port}</span>
+                                {port?.vcp ? <small>VCP</small> : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 ))}
@@ -2533,8 +2594,11 @@ function App() {
   const [config, setConfigState] = useState(defaultConfig);
   const [dirty, setDirty] = useState(false);
   const [connection, setConnection] = useState(initialConnection);
+  const [deviceProfiles, setDeviceProfiles] = useState(loadDeviceProfiles);
   const [deviceInfo, setDeviceInfo] = useState(null);
   const [deviceSnapshot, setDeviceSnapshot] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState("");
+  const [connectionBusy, setConnectionBusy] = useState(false);
   const [topCommitStatus, setTopCommitStatus] = useState("");
   const [topCommitBusy, setTopCommitBusy] = useState(false);
   const [topRefreshBusy, setTopRefreshBusy] = useState(false);
@@ -2551,10 +2615,78 @@ function App() {
     setConfigState(nextConfig);
   };
 
-  async function loadSwitchSnapshot(successMessage = "Refresh completed.") {
-    const result = await window.miniJweb.inspectDevice(connection);
+  function rememberProfile(nextConnection) {
+    if (nextConnection.remember) {
+      const nextProfiles = upsertDeviceProfile(deviceProfiles, nextConnection);
+      setDeviceProfiles(nextProfiles);
+      saveDeviceProfiles(nextProfiles);
+      localStorage.setItem(credentialsStorageKey, JSON.stringify(normalizeConnectionProfile({ ...nextConnection, remember: true })));
+    } else {
+      localStorage.removeItem(credentialsStorageKey);
+    }
+  }
+
+  async function connectToSwitch(nextConnection = connection, options = {}) {
+    const normalized = normalizeConnectionProfile(nextConnection);
+    setConnection(normalized);
+    setConnectionBusy(true);
+    setConnectionStatus("Connecting with NETCONF...");
+    setTopCommitStatus("");
+    try {
+      const result = await window.miniJweb.inspectDevice(normalized);
+      setDeviceInfo(result);
+      if (!result.ok) {
+        setConnectionStatus("Connected, but device verification found warnings.");
+        return;
+      }
+      rememberProfile(normalized);
+      setConnectionStatus("Connected. Loading current interfaces and VLANs...");
+      const snapshot = await window.miniJweb.getSnapshot(normalized);
+      setDeviceSnapshot(snapshot);
+      setCleanConfig(configFromSnapshot(snapshot, defaultConfig));
+      setConnectionStatus("Connected. Current interfaces and VLANs loaded from the switch.");
+      if (options.navigate !== false) {
+        setActive("dashboard");
+      }
+    } catch (error) {
+      setDeviceInfo(null);
+      setDeviceSnapshot(null);
+      setConnectionStatus(error.message || "Connection failed.");
+    } finally {
+      setConnectionBusy(false);
+    }
+  }
+
+  function disconnectFromDevice() {
+    if (dirty && !window.confirm("Disconnect and discard local pending changes?")) {
+      return;
+    }
+    setDeviceInfo(null);
+    setDeviceSnapshot(null);
+    setCleanConfig(defaultConfig);
+    setConnectionStatus("Disconnected. Select a profile or enter switch details when ready.");
+    setActive("deviceAccess");
+  }
+
+  function selectDeviceProfile(key) {
+    const profile = deviceProfiles.find((item) => profileKey(item) === key);
+    if (!profile) {
+      return;
+    }
+    if (dirty && !window.confirm("Switch profile and discard local pending changes?")) {
+      return;
+    }
+    setConnection(profile);
+    setDeviceInfo(null);
+    setDeviceSnapshot(null);
+    setCleanConfig(defaultConfig);
+    setConnectionStatus(`Profile selected: ${profileLabel(profile)}.`);
+  }
+
+  async function loadSwitchSnapshot(successMessage = "Refresh completed.", targetConnection = connection) {
+    const result = await window.miniJweb.inspectDevice(targetConnection);
     setDeviceInfo(result);
-    const snapshot = await window.miniJweb.getSnapshot(connection);
+    const snapshot = await window.miniJweb.getSnapshot(targetConnection);
     setDeviceSnapshot(snapshot);
     setCleanConfig(configFromSnapshot(snapshot, defaultConfig));
     setTopCommitStatus(successMessage);
@@ -2611,10 +2743,10 @@ function App() {
   }
 
   const screen = {
-    dashboard: <Dashboard config={config} commands={commands} errors={errors} deviceSnapshot={deviceSnapshot} connectionProps={{ connection, setConnection, deviceInfo, setDeviceInfo, setDeviceSnapshot, setConfig: setCleanConfig, config, setActive }} />,
-    deviceAccess: <DeviceAccess connectionProps={{ connection, setConnection, deviceInfo, setDeviceInfo, setDeviceSnapshot, setConfig: setCleanConfig, config, setActive }} />,
+    dashboard: <Dashboard config={config} commands={commands} errors={errors} deviceSnapshot={deviceSnapshot} connectionProps={{ connection, setConnection, deviceInfo, connectToSwitch, disconnectFromDevice, connectionStatus, connectionBusy }} />,
+    deviceAccess: <DeviceAccess connectionProps={{ connection, setConnection, deviceInfo, connectToSwitch, disconnectFromDevice, connectionStatus, connectionBusy }} />,
     ports: <Ports config={config} setConfig={setCleanConfig} deviceSnapshot={deviceSnapshot} connection={connection} setDeviceSnapshot={setDeviceSnapshot} />,
-    virtualChassis: <VirtualChassis deviceInfo={deviceInfo} connection={connection} />,
+    virtualChassis: <VirtualChassis deviceInfo={deviceInfo} connection={connection} deviceSnapshot={deviceSnapshot} />,
     monitoring: <Monitoring connection={connection} />,
     vlans: <Vlans config={config} setConfig={setCandidateConfig} />,
     interfaces: <Interfaces config={config} setConfig={setCandidateConfig} deviceSnapshot={deviceSnapshot} />,
@@ -2640,6 +2772,30 @@ function App() {
           </div>
         </div>
         <div className="top-status">
+          <span className={deviceInfo?.ok ? "connection-pill connected" : "connection-pill disconnected"}>
+            {deviceInfo?.ok ? "Connected" : "Disconnected"}
+          </span>
+          <span className="top-device">{deviceInfo?.hostname || connection.host || "No device"}{connection.host ? ` (${connection.host})` : ""}</span>
+          <select
+            className="top-profile-select"
+            value={deviceProfiles.some((profile) => profileKey(profile) === profileKey(connection)) ? profileKey(connection) : ""}
+            onChange={(event) => selectDeviceProfile(event.target.value)}
+            disabled={connectionBusy || deviceProfiles.length === 0}
+            title="Saved device profiles"
+          >
+            <option value="">{deviceProfiles.length ? "Select profile" : "No saved profiles"}</option>
+            {deviceProfiles.map((profile) => (
+              <option key={profileKey(profile)} value={profileKey(profile)}>{profileLabel(profile)}</option>
+            ))}
+          </select>
+          <button onClick={() => connectToSwitch(connection, { navigate: false })} disabled={connectionBusy || !connection.host}>
+            <Lock size={15} />
+            Connect
+          </button>
+          <button onClick={disconnectFromDevice} disabled={connectionBusy || !deviceInfo}>
+            <LogOut size={15} />
+            Disconnect
+          </button>
           <span>{dirty ? "Pending changes" : "Committed"}</span>
           <span>{commands.length} commands</span>
           {firstValidationError ? <span className="top-error" title={errors.join("\n")}>{firstValidationError}</span> : null}

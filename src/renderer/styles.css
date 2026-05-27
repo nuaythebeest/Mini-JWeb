@@ -100,7 +100,7 @@ select:focus {
   display: grid;
   grid-template-rows: 64px 1fr;
   height: 100vh;
-  min-width: 1000px;
+  min-width: 1180px;
 }
 
 .topbar {
@@ -144,7 +144,44 @@ select:focus {
 .top-status {
   align-items: center;
   display: flex;
-  gap: 16px;
+  gap: 10px;
+  min-width: 0;
+}
+
+.connection-pill {
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
+.connection-pill.connected {
+  background: rgba(29, 185, 103, 0.18);
+  color: #b9f5d0;
+}
+
+.connection-pill.disconnected {
+  background: rgba(255, 255, 255, 0.08);
+  color: #d5e4e8;
+}
+
+.top-device {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-profile-select {
+  background: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 6px;
+  color: #17323b;
+  font-size: 13px;
+  height: 32px;
+  max-width: 210px;
+  min-width: 145px;
+  padding: 0 8px;
 }
 
 .top-status .top-error {
@@ -863,19 +900,21 @@ main {
 }
 
 .front-panel {
-  align-items: center;
   display: grid;
-  gap: 4px;
-  grid-template-columns: repeat(auto-fill, minmax(30px, 38px));
-}
-
-.front-panel.access-panel {
-  grid-template-columns: repeat(24, 38px);
-}
-
-.front-panel.uplink-panel {
-  grid-template-columns: repeat(4, 38px);
+  gap: 5px;
   justify-content: start;
+}
+
+.front-panel-line {
+  display: grid;
+  gap: 5px;
+  grid-auto-columns: 38px;
+  grid-auto-flow: column;
+}
+
+.front-panel.access-panel,
+.front-panel.uplink-panel {
+  min-width: max-content;
 }
 
 .front-port {
