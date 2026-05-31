@@ -365,6 +365,36 @@ function groupFrontPanelPorts(frontPanelPorts) {
     }));
 }
 
+function isDisplayableFrontPanelPort(name, deviceInfo) {
+  const parts = portParts(name);
+  if (parts.prefix === "vcp") {
+    return false;
+  }
+  const model = String(deviceInfo?.model || "").toLowerCase();
+  if (/^ex4300/.test(model) && parts.pic === "1" && Number(parts.port) > 1) {
+    return false;
+  }
+  return true;
+}
+
+const VC_PREPROVISION_MODELS = [
+  "EX2300",
+  "EX2300-C",
+  "EX3400",
+  "EX4000",
+  "EX4100",
+  "EX4100-F",
+  "EX4300-48T",
+  "EX4300-48P",
+  "EX4300-48MP",
+  "EX4400",
+  "EX4400-24X",
+  "EX4400-48F",
+  "EX4650-48Y",
+  "QFX5110",
+  "QFX5120"
+];
+
 function virtualChassisModeLabel(snapshot) {
   const mode = String(snapshot?.virtualChassis?.mode || "").toLowerCase();
   if (mode === "hgoe") {
@@ -1059,7 +1089,12 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
                   <tr key={`${member.memberId}-${index}`}>
                     <td><TextInput value={member.memberId} onChange={(event) => updateVcMember(index, { memberId: event.target.value })} /></td>
                     <td><TextInput value={member.serialNumber} onChange={(event) => updateVcMember(index, { serialNumber: event.target.value.trim().toUpperCase() })} placeholder="PE3717390443" /></td>
-                    <td><TextInput value={member.model || ""} onChange={(event) => updateVcMember(index, { model: event.target.value })} placeholder="EX4300-48T" /></td>
+                    <td>
+                      <select value={member.model || ""} onChange={(event) => updateVcMember(index, { model: event.target.value })}>
+                        <option value="">Select model</option>
+                        {VC_PREPROVISION_MODELS.map((model) => <option key={model} value={model}>{model}</option>)}
+                      </select>
+                    </td>
                     <td>
                       <select value={member.role || "line-card"} onChange={(event) => updateVcMember(index, { role: event.target.value })}>
                         <option value="routing-engine">Routing Engine</option>
@@ -1196,7 +1231,7 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
   );
 }
 
-function Ports({ config, setConfig, deviceSnapshot, connection, setDeviceSnapshot }) {
+function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setDeviceSnapshot }) {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const snapshotByName = new Map((deviceSnapshot?.ports || []).map((port) => [port.name, port]));
@@ -1209,7 +1244,7 @@ function Ports({ config, setConfig, deviceSnapshot, connection, setDeviceSnapsho
       const port = snapshotByName.get(name);
       return [physicalInterfaceName(name), port];
     })).entries()
-  ).filter(([name]) => /^(ge|mge|xe|et|vcp)-/i.test(name));
+  ).filter(([name]) => /^(ge|mge|xe|et)-/i.test(name) && isDisplayableFrontPanelPort(name, deviceInfo));
   const frontPanelGroups = groupFrontPanelPorts(frontPanelPorts);
 
   async function refresh() {
@@ -1282,7 +1317,7 @@ function Ports({ config, setConfig, deviceSnapshot, connection, setDeviceSnapsho
               </tr>
             </thead>
             <tbody>
-              {names.map((name) => {
+              {names.filter((name) => !/^vcp-/i.test(physicalInterfaceName(name))).map((name) => {
                 const port = snapshotByName.get(name);
                 const oper = port?.operStatus || "unknown";
                 const configSummary = configLabel(port?.config);
@@ -1394,6 +1429,7 @@ function Vlans({ config, setConfig }) {
 
 function Interfaces({ config, setConfig, deviceSnapshot }) {
   const [selectedName, setSelectedName] = useState("");
+  const [selectedMember, setSelectedMember] = useState("all");
   const supportedPort = /^(ge|mge|xe|et|vcp)-/i;
   const portByName = useMemo(() => {
     const grouped = new Map();
@@ -1402,7 +1438,7 @@ function Interfaces({ config, setConfig, deviceSnapshot }) {
         return;
       }
       const baseName = physicalInterfaceName(port.name);
-      if (!supportedPort.test(baseName)) {
+      if (!supportedPort.test(baseName) || /^vcp-/i.test(baseName)) {
         return;
       }
       const current = grouped.get(baseName);
@@ -1418,11 +1454,19 @@ function Interfaces({ config, setConfig, deviceSnapshot }) {
   );
   const portNames = useMemo(
     () => Array.from(new Set([...portByName.keys(), ...interfaceByName.keys()]))
-      .filter((name) => supportedPort.test(name))
+      .filter((name) => supportedPort.test(name) && !/^vcp-/i.test(name))
       .sort(compareInterfaceNames),
     [portByName, interfaceByName]
   );
-  const activeName = portNames.includes(selectedName) ? selectedName : portNames[0] || "";
+  const memberOptions = useMemo(() => {
+    const members = Array.from(new Set(portNames.map((name) => portParts(name).fpc))).sort((a, b) => Number(a) - Number(b));
+    return members;
+  }, [portNames]);
+  const visiblePortNames = useMemo(
+    () => selectedMember === "all" ? portNames : portNames.filter((name) => portParts(name).fpc === selectedMember),
+    [portNames, selectedMember]
+  );
+  const activeName = visiblePortNames.includes(selectedName) ? selectedName : visiblePortNames[0] || "";
   const activeEntry = interfaceByName.get(activeName);
   const activeIndex = activeEntry?.index ?? -1;
   const activePort = portByName.get(activeName);
@@ -1490,7 +1534,14 @@ function Interfaces({ config, setConfig, deviceSnapshot }) {
     <Section title="Interface Configuration" icon={Cable}>
       <div className="interface-split">
         <div className="interface-picker" aria-label="Interface list">
-          {portNames.length ? portNames.map((name) => {
+          <div className="interface-filter">
+            <label>Member</label>
+            <select value={selectedMember} onChange={(event) => { setSelectedMember(event.target.value); setSelectedName(""); }}>
+              <option value="all">All members</option>
+              {memberOptions.map((member) => <option key={member} value={member}>FPC {member}</option>)}
+            </select>
+          </div>
+          {visiblePortNames.length ? visiblePortNames.map((name) => {
             const port = portByName.get(name);
             const candidate = interfaceByName.get(name)?.item;
             const oper = port?.operStatus || "unknown";
@@ -2870,7 +2921,7 @@ function App() {
   const screen = {
     dashboard: <Dashboard config={config} commands={commands} errors={errors} deviceSnapshot={deviceSnapshot} connectionProps={{ connection, setConnection, deviceInfo, connectToSwitch, disconnectFromDevice, connectionStatus, connectionBusy }} />,
     deviceAccess: <DeviceAccess connectionProps={{ connection, setConnection, deviceInfo, connectToSwitch, disconnectFromDevice, connectionStatus, connectionBusy }} />,
-    ports: <Ports config={config} setConfig={setCleanConfig} deviceSnapshot={deviceSnapshot} connection={connection} setDeviceSnapshot={setDeviceSnapshot} />,
+    ports: <Ports config={config} setConfig={setCleanConfig} deviceInfo={deviceInfo} deviceSnapshot={deviceSnapshot} connection={connection} setDeviceSnapshot={setDeviceSnapshot} />,
     virtualChassis: <VirtualChassis config={config} setConfig={setCandidateConfig} deviceInfo={deviceInfo} connection={connection} deviceSnapshot={deviceSnapshot} />,
     monitoring: <Monitoring connection={connection} />,
     vlans: <Vlans config={config} setConfig={setCandidateConfig} />,

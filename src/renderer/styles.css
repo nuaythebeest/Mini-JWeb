@@ -900,15 +900,17 @@ main {
 }
 
 .pic-stack {
-  display: grid;
-  gap: 8px;
+  align-items: start;
+  display: flex;
+  gap: 14px;
+  min-width: max-content;
 }
 
 .pic-row {
-  align-items: center;
+  align-items: start;
   display: grid;
-  gap: 8px;
-  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 6px;
+  grid-template-columns: 42px minmax(0, max-content);
 }
 
 .pic-label {
@@ -926,8 +928,8 @@ main {
 
 .front-panel-line {
   display: grid;
-  gap: 5px;
-  grid-auto-columns: 38px;
+  gap: 4px;
+  grid-auto-columns: 32px;
   grid-auto-flow: column;
 }
 
@@ -945,9 +947,9 @@ main {
   display: inline-flex;
   font-size: 11px;
   font-weight: 700;
-  height: 32px;
+  height: 28px;
   justify-content: center;
-  min-width: 30px;
+  min-width: 28px;
   position: relative;
 }
 
@@ -1014,6 +1016,21 @@ main {
   line-height: 1;
   padding: 2px 4px;
   position: absolute;
+}
+
+.interface-filter {
+  background: #f7fafb;
+  border-bottom: 1px solid #e0e9ec;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+
+.interface-filter label {
+  color: #607983;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .port-badge {

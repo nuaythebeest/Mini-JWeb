@@ -15,6 +15,21 @@ const FQDN_OR_IP = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
 const TIME_ZONE = /^[A-Za-z_]+\/[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)?$/;
 const VC_SERIAL = /^[A-Za-z0-9_-]+$/;
 const VC_ROLES = new Set(["routing-engine", "line-card"]);
+
+function irbHasDhcpServices(irb = {}) {
+  return Boolean(irb.dhcpServer?.enabled || irb.dhcpRelay?.enabled);
+}
+
+function irbHasConfig(irb = {}) {
+  return Boolean(
+    String(irb.unit || "").trim()
+    || String(irb.vlan || "").trim()
+    || String(irb.address || "").trim()
+    || String(irb.mtu || "").trim()
+    || String(irb.description || "").trim()
+    || irbHasDhcpServices(irb)
+  );
+}
 const PROTECTED_VLANS = new Set(["default"]);
 const BRIDGE_PRIORITIES = new Set(Array.from({ length: 16 }, (_, index) => String(index * 4096)));
 
@@ -229,12 +244,12 @@ export function validateConfig(config) {
     });
   }
 
-  config.irbs.forEach((irb, index) => {
+  config.irbs.filter(irbHasConfig).forEach((irb, index) => {
     const unit = Number(irb.unit);
     if (!Number.isInteger(unit) || unit < 0 || unit > 16384) {
       errors.push(`IRB ${index + 1}: unit must be a positive number.`);
     }
-    if (!CIDR.test(irb.address || "")) {
+    if (irb.address && !CIDR.test(irb.address || "")) {
       errors.push(`IRB ${irb.unit || index + 1}: address must be CIDR format, for example 192.0.2.1/24.`);
     }
     validateMtu(irb.mtu, `IRB ${irb.unit || index + 1}`, errors);
@@ -489,9 +504,13 @@ export function buildSetCommands(config) {
     }
   });
 
-  config.irbs.filter((irb) => irb.modified !== false).forEach((irb) => {
+  config.irbs.filter((irb) => irb.modified !== false && irbHasConfig(irb)).forEach((irb) => {
     const irbName = `irb.${irb.unit}`;
-    commands.push(`set interfaces irb unit ${irb.unit} family inet address ${irb.address}`);
+    if (irb.address) {
+      commands.push(`delete interfaces irb unit ${irb.unit} family inet dhcp`);
+      commands.push(`delete interfaces irb unit ${irb.unit} family inet address`);
+      commands.push(`set interfaces irb unit ${irb.unit} family inet address ${irb.address}`);
+    }
     if (irb.mtu) {
       commands.push(`set interfaces irb unit ${irb.unit} family inet mtu ${irb.mtu}`);
     }
