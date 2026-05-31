@@ -397,6 +397,12 @@ export function validateConfig(config) {
       if (!VC_ROLES.has(member.role || "")) {
         errors.push(`${label}: role must be routing-engine or line-card.`);
       }
+      if (member.mastershipPriority !== undefined && String(member.mastershipPriority).trim() !== "") {
+        const priority = Number(member.mastershipPriority);
+        if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
+          errors.push(`${label}: mastership priority must be 0-255.`);
+        }
+      }
       if (member.role === "routing-engine") {
         routingEngines += 1;
       }
@@ -736,6 +742,9 @@ export function buildSetCommands(config) {
       (virtualChassis.members || []).forEach((member) => {
         commands.push(`set virtual-chassis member ${member.memberId} serial-number ${member.serialNumber}`);
         commands.push(`set virtual-chassis member ${member.memberId} role ${member.role || "line-card"}`);
+        if (member.mastershipPriority !== undefined && String(member.mastershipPriority).trim() !== "") {
+          commands.push(`set virtual-chassis member ${member.memberId} mastership-priority ${member.mastershipPriority}`);
+        }
       });
     } else {
       commands.push("delete virtual-chassis preprovisioned");

@@ -518,6 +518,7 @@ function parseVirtualChassisConfig(configXml) {
       memberId: parseTag(block, "name"),
       serialNumber: parseTag(block, "serial-number"),
       role: parseTag(block, "role") || "line-card",
+      mastershipPriority: parseTag(block, "mastership-priority"),
       modified: false
     })).filter((member) => member.memberId),
     modified: false

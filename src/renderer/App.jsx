@@ -950,11 +950,14 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
     while (usedIds.has(String(nextId))) {
       nextId += 1;
     }
+    const routingEngineCount = (virtualChassis.members || []).filter((member) => member.role === "routing-engine").length;
+    const role = nextId < 2 ? "routing-engine" : "line-card";
+    const mastershipPriority = role === "routing-engine" ? String(routingEngineCount === 0 ? 255 : 129) : "0";
     setVirtualChassis({
       preprovisioned: true,
       members: [
         ...(virtualChassis.members || []),
-        { memberId: String(nextId), serialNumber: "", model: deviceInfo?.model || "", role: nextId < 2 ? "routing-engine" : "line-card", modified: true }
+        { memberId: String(nextId), serialNumber: "", model: deviceInfo?.model || "", role, mastershipPriority, modified: true }
       ]
     });
   }
@@ -969,6 +972,7 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
       serialNumber: member.serialNumber,
       model: member.model,
       role: /master|backup/i.test(member.role || "") ? "routing-engine" : "line-card",
+      mastershipPriority: member.priority || (/master/i.test(member.role || "") ? "255" : /backup/i.test(member.role || "") ? "129" : "0"),
       modified: true
     }));
     if (imported.length === 0 && deviceInfo?.serialNumber) {
@@ -977,6 +981,7 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
         serialNumber: deviceInfo.serialNumber,
         model: deviceInfo.model || "",
         role: "routing-engine",
+        mastershipPriority: "255",
         modified: true
       });
     }
@@ -1047,6 +1052,7 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
                 <th>Serial Number</th>
                 <th>Model</th>
                 <th>Role</th>
+                <th>Mastership Priority</th>
                 <th>Status</th>
                 <th></th>
               </tr>
@@ -1065,6 +1071,14 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
                         <option value="line-card">Linecard</option>
                       </select>
                     </td>
+                    <td>
+                      <select value={member.mastershipPriority ?? ""} onChange={(event) => updateVcMember(index, { mastershipPriority: event.target.value })}>
+                        <option value="">No change</option>
+                        <option value="255">255 - Preferred Master</option>
+                        <option value="129">129 - Preferred Backup</option>
+                        <option value="0">0 - Linecard/Low</option>
+                      </select>
+                    </td>
                     <td>{liveMember ? `${liveMember.status} / ${liveMember.role}` : "Planned"}</td>
                     <td>
                       <button type="button" className="icon" onClick={() => removeVcMember(index)} title="Remove member">
@@ -1075,7 +1089,7 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
                 );
               })}
               {(virtualChassis.members || []).length === 0 ? (
-                <tr><td colSpan="6" className="empty-state">No preprovisioned members yet. Import current members or add member rows.</td></tr>
+                <tr><td colSpan="7" className="empty-state">No preprovisioned members yet. Import current members or add member rows.</td></tr>
               ) : null}
             </tbody>
           </table>
