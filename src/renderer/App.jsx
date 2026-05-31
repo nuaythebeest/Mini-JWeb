@@ -1234,18 +1234,55 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
 function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setDeviceSnapshot }) {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [filterText, setFilterText] = useState("");
+  const [memberFilter, setMemberFilter] = useState("all");
   const snapshotByName = new Map((deviceSnapshot?.ports || []).map((port) => [port.name, port]));
   const names = Array.from(new Set([...(deviceSnapshot?.ports || []).map((port) => port.name)]))
     .filter(Boolean)
     .filter((name) => !String(name).endsWith(".16386"))
     .sort(compareInterfaceNames);
+  const memberOptions = Array.from(new Set(names
+    .filter((name) => /^(ge|mge|xe|et)-/i.test(physicalInterfaceName(name)))
+    .map((name) => portParts(physicalInterfaceName(name)).fpc)))
+    .sort((a, b) => Number(a) - Number(b));
+  const matchesPortFilter = (name) => {
+    const baseName = physicalInterfaceName(name);
+    const port = snapshotByName.get(name) || snapshotByName.get(baseName);
+    const parts = portParts(baseName);
+    if (memberFilter !== "all" && parts.fpc !== memberFilter) {
+      return false;
+    }
+    const query = filterText.trim().toLowerCase();
+    if (!query) {
+      return true;
+    }
+    const haystack = [
+      name,
+      baseName,
+      `fpc ${parts.fpc}`,
+      `pic ${parts.pic}`,
+      `port ${parts.port}`,
+      port?.adminStatus,
+      port?.operStatus,
+      port?.proto,
+      port?.local,
+      port?.remote,
+      port?.vcp ? "vcp" : "",
+      port?.vcp?.status,
+      port?.vcp?.neighbor,
+      configFullLabel(port?.config)
+    ].filter(Boolean).join(" ").toLowerCase();
+    return haystack.includes(query);
+  };
+  const filteredNames = names.filter(matchesPortFilter);
   const frontPanelPorts = Array.from(
-    new Map(names.map((name) => {
+    new Map(filteredNames.map((name) => {
       const port = snapshotByName.get(name);
       return [physicalInterfaceName(name), port];
     })).entries()
   ).filter(([name]) => /^(ge|mge|xe|et)-/i.test(name) && isDisplayableFrontPanelPort(name, deviceInfo));
   const frontPanelGroups = groupFrontPanelPorts(frontPanelPorts);
+  const tableNames = filteredNames.filter((name) => !/^vcp-/i.test(physicalInterfaceName(name)));
 
   async function refresh() {
     setBusy(true);
@@ -1270,6 +1307,21 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
         actions={<button onClick={refresh} disabled={busy}><RefreshCw size={16} />Refresh</button>}
       >
         <p className="status-text">{status || "Read-only status from show interfaces terse. Edit configuration in the Interfaces section."}</p>
+        <div className="port-filter-bar">
+          <Field label="Search Ports">
+            <TextInput value={filterText} onChange={(event) => setFilterText(event.target.value)} placeholder="Interface, FPC, PIC, link state, VLAN, or VCP" />
+          </Field>
+          <Field label="Member">
+            <select value={memberFilter} onChange={(event) => setMemberFilter(event.target.value)}>
+              <option value="all">All members</option>
+              {memberOptions.map((member) => <option key={member} value={member}>FPC {member}</option>)}
+            </select>
+          </Field>
+          <div className="port-filter-count">
+            <strong>{tableNames.length}</strong>
+            <span>ports shown</span>
+          </div>
+        </div>
         <div className="front-panel-stack">
           {frontPanelGroups.map((group) => (
             <div key={group.fpc} className="front-panel-row">
@@ -1301,7 +1353,7 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
               </div>
             </div>
           ))}
-          {frontPanelGroups.length === 0 ? <div className="empty-state">No supported front-panel ports found in show interfaces terse.</div> : null}
+          {frontPanelGroups.length === 0 ? <div className="empty-state">No supported front-panel ports match the current filter.</div> : null}
         </div>
         <div className="port-table">
           <table>
@@ -1317,7 +1369,7 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
               </tr>
             </thead>
             <tbody>
-              {names.filter((name) => !/^vcp-/i.test(physicalInterfaceName(name))).map((name) => {
+              {tableNames.map((name) => {
                 const port = snapshotByName.get(name);
                 const oper = port?.operStatus || "unknown";
                 const configSummary = configLabel(port?.config);
@@ -1349,6 +1401,9 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
                   </tr>
                 );
               })}
+              {tableNames.length === 0 ? (
+                <tr><td colSpan="7" className="empty-state">No ports match the current filter.</td></tr>
+              ) : null}
             </tbody>
           </table>
         </div>

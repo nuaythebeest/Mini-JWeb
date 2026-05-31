@@ -877,6 +877,38 @@ main {
   overflow-x: auto;
 }
 
+.port-filter-bar {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(220px, 1fr) minmax(140px, 180px) max-content;
+  margin-top: 14px;
+}
+
+.port-filter-count {
+  background: #eef5f6;
+  border: 1px solid #d5e2e6;
+  border-radius: 8px;
+  color: #536c75;
+  display: grid;
+  min-height: 38px;
+  padding: 6px 12px;
+  text-align: right;
+}
+
+.port-filter-count strong {
+  color: #183f47;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.port-filter-count span {
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
 .front-panel-stack {
   background: #f5f8f9;
   border: 1px solid #d8e3e7;
