@@ -507,6 +507,23 @@ function hasLeaf(block, tag) {
   return new RegExp(`<${qualifiedTag}(?:\\s[^>]*)?\\s*/>|<${qualifiedTag}(?:\\s[^>]*)?>`, "i").test(block || "");
 }
 
+function parseVirtualChassisConfig(configXml) {
+  const vcBlock = firstConfigBlock(configXml, "virtual-chassis");
+  if (!vcBlock) {
+    return { preprovisioned: false, members: [], modified: false };
+  }
+  return {
+    preprovisioned: hasLeaf(vcBlock, "preprovisioned"),
+    members: collectBlocks(vcBlock, "member").map((block) => ({
+      memberId: parseTag(block, "name"),
+      serialNumber: parseTag(block, "serial-number"),
+      role: parseTag(block, "role") || "line-card",
+      modified: false
+    })).filter((member) => member.memberId),
+    modified: false
+  };
+}
+
 function normalizeBridgePriority(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (!raw) {
@@ -706,8 +723,24 @@ function parseVirtualChassisStatus(text) {
   } else if (/\bhigig\b|hi-gig|high-gig/i.test(output)) {
     mode = "higig";
   }
+  const members = [];
+  output.split(/\r?\n/).forEach((line) => {
+    const match = line.match(/^\s*(\d+)\s+\(FPC\s+(\d+)\)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\S+)/i);
+    if (match) {
+      members.push({
+        memberId: match[1],
+        fpc: match[2],
+        status: match[3],
+        serialNumber: match[4],
+        model: match[5],
+        priority: match[6],
+        role: match[7].replace(/\*$/, "")
+      });
+    }
+  });
   return {
     mode,
+    members,
     raw: output
   };
 }
@@ -876,7 +909,7 @@ async function getDeviceSnapshot(connection) {
   return openNetconfSession(connection, async ({ send, close }) => {
     const [interfacesTerse, configuration, chassisHardware, opticsDiagnostics, virtualChassisPortsOutput, virtualChassisStatusOutput, vlanAttempt, staticRouteConfigAttempt] = await Promise.all([
       send(rpc("show-interfaces-terse", '<get-interface-information format="text"><terse/></get-interface-information>')),
-      send(rpc("configuration", "<get-configuration><configuration><interfaces/><vlans/><protocols/><chassis/><system/><routing-instances/><access/><forwarding-options/></configuration></get-configuration>")),
+      send(rpc("configuration", "<get-configuration><configuration><interfaces/><vlans/><protocols/><chassis/><virtual-chassis/><system/><routing-instances/><access/><forwarding-options/></configuration></get-configuration>")),
       send(commandRpc("show-chassis-hardware", "show chassis hardware")).catch(() => ""),
       send(commandRpc("show-interfaces-diagnostics-optics", "show interfaces diagnostics optics")).catch(() => ""),
       send(commandRpc("show-virtual-chassis-vc-port", "show virtual-chassis vc-port")).catch(() => ""),
@@ -896,6 +929,7 @@ async function getDeviceSnapshot(connection) {
     const management = parseManagementConfig(configuration);
     const spanningTree = parseSpanningTreeConfig(configuration, configVlans);
     const lldp = parseLldpConfig(configuration);
+    const virtualChassisConfig = parseVirtualChassisConfig(configuration);
     const vlans = parseShowVlans(vlanOutput, configVlans);
     const tersePorts = parseShowInterfacesTerse(interfacesTerse, interfaceConfigs);
     const chassisPorts = parseChassisHardwarePorts(chassisHardware, tersePorts);
@@ -919,6 +953,7 @@ async function getDeviceSnapshot(connection) {
       ports,
       virtualChassisPorts,
       virtualChassis,
+      virtualChassisConfig,
       vlans,
       configuredInterfaces: Array.from(interfaceConfigs.values())
         .filter((item) => (item.portType !== "unknown" || item.aeBundle) && item.name === physicalName(item.name) && !/^ae\d+$/i.test(item.name))

@@ -13,6 +13,8 @@ const USER_NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,62}$/;
 const HOST_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 const FQDN_OR_IP = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
 const TIME_ZONE = /^[A-Za-z_]+\/[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)?$/;
+const VC_SERIAL = /^[A-Za-z0-9_-]+$/;
+const VC_ROLES = new Set(["routing-engine", "line-card"]);
 const PROTECTED_VLANS = new Set(["default"]);
 const BRIDGE_PRIORITIES = new Set(Array.from({ length: 16 }, (_, index) => String(index * 4096)));
 
@@ -370,6 +372,43 @@ export function validateConfig(config) {
     }
   });
 
+  const virtualChassis = config.virtualChassis || defaultConfig.virtualChassis;
+  if (virtualChassis.modified !== false && virtualChassis.preprovisioned) {
+    const memberIds = new Set();
+    const serials = new Set();
+    let routingEngines = 0;
+    (virtualChassis.members || []).forEach((member, index) => {
+      const label = `VC member ${member.memberId || index + 1}`;
+      const memberId = Number(member.memberId);
+      if (!Number.isInteger(memberId) || memberId < 0 || memberId > 9) {
+        errors.push(`${label}: member ID must be 0-9.`);
+      }
+      if (memberIds.has(String(member.memberId))) {
+        errors.push(`${label}: member ID is duplicated.`);
+      }
+      memberIds.add(String(member.memberId));
+      if (!VC_SERIAL.test(member.serialNumber || "")) {
+        errors.push(`${label}: serial number is required and must use letters, numbers, dash, or underscore.`);
+      }
+      if (serials.has(String(member.serialNumber || ""))) {
+        errors.push(`${label}: serial number is duplicated.`);
+      }
+      serials.add(String(member.serialNumber || ""));
+      if (!VC_ROLES.has(member.role || "")) {
+        errors.push(`${label}: role must be routing-engine or line-card.`);
+      }
+      if (member.role === "routing-engine") {
+        routingEngines += 1;
+      }
+    });
+    if ((virtualChassis.members || []).length === 0) {
+      errors.push("Virtual Chassis preprovisioning requires at least one member.");
+    }
+    if (routingEngines > 2) {
+      errors.push("Virtual Chassis preprovisioning should not define more than two routing-engine members.");
+    }
+  }
+
   const system = config.management.system || defaultConfig.management.system;
   if (system.modified !== false) {
     if (system.hostName && !HOST_NAME.test(system.hostName)) {
@@ -419,6 +458,7 @@ export function buildSetCommands(config) {
   const currentInterfaceNames = new Set(config.interfaces.map((item) => stripUnit(item.name)).filter(Boolean));
   const currentAggregateNames = new Set((config.aggregate?.interfaces || []).map((item) => aeName(item.number)).filter(Boolean));
   const baselineInterfaceNames = new Set(config.baseline?.interfaces || []);
+  const virtualChassis = config.virtualChassis || defaultConfig.virtualChassis;
 
   (config.baseline?.vlans || []).forEach((vlanName) => {
     const protectedVlan = PROTECTED_VLANS.has(String(vlanName || "").toLowerCase());
@@ -690,6 +730,18 @@ export function buildSetCommands(config) {
     }
   });
 
+  if (virtualChassis.modified !== false) {
+    if (virtualChassis.preprovisioned) {
+      commands.push("set virtual-chassis preprovisioned");
+      (virtualChassis.members || []).forEach((member) => {
+        commands.push(`set virtual-chassis member ${member.memberId} serial-number ${member.serialNumber}`);
+        commands.push(`set virtual-chassis member ${member.memberId} role ${member.role || "line-card"}`);
+      });
+    } else {
+      commands.push("delete virtual-chassis preprovisioned");
+    }
+  }
+
   if (config.management.modified !== false && config.management.enabled) {
     commands.push("set system management-instance");
     commands.push(`delete interfaces ${config.management.interfaceName} unit 0 family inet`);
@@ -815,6 +867,7 @@ export function configFromSnapshot(snapshot, previousConfig = defaultConfig) {
       users: []
     },
     lldp: snapshot.lldp || previousConfig.lldp || defaultConfig.lldp,
+    virtualChassis: snapshot.virtualChassisConfig || previousConfig.virtualChassis || defaultConfig.virtualChassis,
     spanningTree: snapshot.spanningTree || previousConfig.spanningTree || defaultConfig.spanningTree,
     aggregate: {
       deviceCount: snapshot.aggregateDeviceCount || "",
@@ -859,6 +912,11 @@ export const defaultConfig = {
     enabled: false,
     med: false,
     interfaces: "all",
+    modified: false
+  },
+  virtualChassis: {
+    preprovisioned: false,
+    members: [],
     modified: false
   },
   spanningTree: defaultSpanningTree,

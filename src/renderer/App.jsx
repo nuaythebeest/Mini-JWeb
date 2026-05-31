@@ -892,8 +892,9 @@ function DeviceAccess({ connectionProps }) {
   );
 }
 
-function VirtualChassis({ deviceInfo, connection, deviceSnapshot }) {
+function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnapshot }) {
   const hgoe = hgoeEligibility(deviceInfo);
+  const virtualChassis = config.virtualChassis || defaultConfig.virtualChassis;
   const connected = Boolean(deviceInfo?.ok);
   const statusClass = hgoe.eligible ? "ok" : hgoe.supported ? "warn" : "alert";
   const versionText = connected ? hgoe.release || "Unknown" : "Connect to a switch";
@@ -923,6 +924,63 @@ function VirtualChassis({ deviceInfo, connection, deviceSnapshot }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  function setVirtualChassis(nextVirtualChassis) {
+    setConfig({
+      ...config,
+      virtualChassis: {
+        ...virtualChassis,
+        ...nextVirtualChassis,
+        modified: true
+      }
+    });
+  }
+
+  function updateVcMember(index, patch) {
+    const members = (virtualChassis.members || []).map((member, memberIndex) => (
+      memberIndex === index ? { ...member, ...patch, modified: true } : member
+    ));
+    setVirtualChassis({ members });
+  }
+
+  function addVcMember() {
+    const usedIds = new Set((virtualChassis.members || []).map((member) => String(member.memberId)));
+    let nextId = 0;
+    while (usedIds.has(String(nextId))) {
+      nextId += 1;
+    }
+    setVirtualChassis({
+      preprovisioned: true,
+      members: [
+        ...(virtualChassis.members || []),
+        { memberId: String(nextId), serialNumber: "", model: deviceInfo?.model || "", role: nextId < 2 ? "routing-engine" : "line-card", modified: true }
+      ]
+    });
+  }
+
+  function removeVcMember(index) {
+    setVirtualChassis({ members: (virtualChassis.members || []).filter((_member, memberIndex) => memberIndex !== index) });
+  }
+
+  function importCurrentMembers() {
+    const imported = (deviceSnapshot?.virtualChassis?.members || []).map((member) => ({
+      memberId: member.memberId,
+      serialNumber: member.serialNumber,
+      model: member.model,
+      role: /master|backup/i.test(member.role || "") ? "routing-engine" : "line-card",
+      modified: true
+    }));
+    if (imported.length === 0 && deviceInfo?.serialNumber) {
+      imported.push({
+        memberId: "0",
+        serialNumber: deviceInfo.serialNumber,
+        model: deviceInfo.model || "",
+        role: "routing-engine",
+        modified: true
+      });
+    }
+    setVirtualChassis({ preprovisioned: true, members: imported });
   }
 
   return (
@@ -957,6 +1015,72 @@ function VirtualChassis({ deviceInfo, connection, deviceSnapshot }) {
             <p>Current release {hgoe.release || "unknown"} is below the minimum. Show a warning and disable HGoE mode-change actions until the switch is upgraded.</p>
           ) : null}
         </div>
+      </Section>
+
+      <Section title="Preprovisioning" icon={ClipboardCheck}>
+        <div className="guidance-panel">
+          <strong>Deterministic Virtual Chassis membership</strong>
+          <p>Preprovisioning binds member IDs to serial numbers and roles. Use two routing-engine members for a primary/backup design, then convert the intended VCP links.</p>
+          <code>set virtual-chassis preprovisioned</code>
+        </div>
+        <div className="vc-preprovision-toolbar">
+          <label className="checkline">
+            <input
+              type="checkbox"
+              checked={Boolean(virtualChassis.preprovisioned)}
+              onChange={(event) => setVirtualChassis({ preprovisioned: event.target.checked })}
+            />
+            Enable preprovisioned mode
+          </label>
+          <button type="button" onClick={importCurrentMembers}>
+            <RefreshCw size={16} />Import current members
+          </button>
+          <button type="button" onClick={addVcMember}>
+            <Plus size={16} />Add member
+          </button>
+        </div>
+        <div className="table-wrap vc-member-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Member ID</th>
+                <th>Serial Number</th>
+                <th>Model</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {(virtualChassis.members || []).map((member, index) => {
+                const liveMember = (deviceSnapshot?.virtualChassis?.members || []).find((item) => item.serialNumber === member.serialNumber || item.memberId === member.memberId);
+                return (
+                  <tr key={`${member.memberId}-${index}`}>
+                    <td><TextInput value={member.memberId} onChange={(event) => updateVcMember(index, { memberId: event.target.value })} /></td>
+                    <td><TextInput value={member.serialNumber} onChange={(event) => updateVcMember(index, { serialNumber: event.target.value.trim().toUpperCase() })} placeholder="PE3717390443" /></td>
+                    <td><TextInput value={member.model || ""} onChange={(event) => updateVcMember(index, { model: event.target.value })} placeholder="EX4300-48T" /></td>
+                    <td>
+                      <select value={member.role || "line-card"} onChange={(event) => updateVcMember(index, { role: event.target.value })}>
+                        <option value="routing-engine">Routing Engine</option>
+                        <option value="line-card">Linecard</option>
+                      </select>
+                    </td>
+                    <td>{liveMember ? `${liveMember.status} / ${liveMember.role}` : "Planned"}</td>
+                    <td>
+                      <button type="button" className="icon" onClick={() => removeVcMember(index)} title="Remove member">
+                        <Trash2 size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {(virtualChassis.members || []).length === 0 ? (
+                <tr><td colSpan="6" className="empty-state">No preprovisioned members yet. Import current members or add member rows.</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+        <p className="status-text">These rows generate candidate configuration only. Use Commit Confirm for the safe apply step.</p>
       </Section>
 
       <Section title="Non-HGoE Port Conversion Note" icon={Cable}>
@@ -2746,7 +2870,7 @@ function App() {
     dashboard: <Dashboard config={config} commands={commands} errors={errors} deviceSnapshot={deviceSnapshot} connectionProps={{ connection, setConnection, deviceInfo, connectToSwitch, disconnectFromDevice, connectionStatus, connectionBusy }} />,
     deviceAccess: <DeviceAccess connectionProps={{ connection, setConnection, deviceInfo, connectToSwitch, disconnectFromDevice, connectionStatus, connectionBusy }} />,
     ports: <Ports config={config} setConfig={setCleanConfig} deviceSnapshot={deviceSnapshot} connection={connection} setDeviceSnapshot={setDeviceSnapshot} />,
-    virtualChassis: <VirtualChassis deviceInfo={deviceInfo} connection={connection} deviceSnapshot={deviceSnapshot} />,
+    virtualChassis: <VirtualChassis config={config} setConfig={setCandidateConfig} deviceInfo={deviceInfo} connection={connection} deviceSnapshot={deviceSnapshot} />,
     monitoring: <Monitoring connection={connection} />,
     vlans: <Vlans config={config} setConfig={setCandidateConfig} />,
     interfaces: <Interfaces config={config} setConfig={setCandidateConfig} deviceSnapshot={deviceSnapshot} />,

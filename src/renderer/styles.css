@@ -396,6 +396,25 @@ main {
   gap: 6px;
 }
 
+.vc-preprovision-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.vc-member-table input,
+.vc-member-table select {
+  min-width: 120px;
+  width: 100%;
+}
+
+.vc-member-table td:last-child {
+  text-align: right;
+  width: 54px;
+}
+
 .firmware-layout {
   display: grid;
   gap: 16px;
