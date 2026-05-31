@@ -571,6 +571,10 @@ main {
   gap: 6px;
 }
 
+.field.field-action {
+  align-content: end;
+}
+
 .field > span,
 .checkline {
   color: #536c75;

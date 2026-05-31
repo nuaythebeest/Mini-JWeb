@@ -1759,6 +1759,12 @@ function AggregateEthernet({ config, setConfig }) {
         <Field label="AE Device Count">
           <TextInput value={aggregate.deviceCount || ""} onChange={(event) => updateAggregate({ deviceCount: event.target.value })} placeholder="Example: 4" />
         </Field>
+        <div className="field field-action">
+          <span>Aggregate Interfaces</span>
+          <button type="button" className="primary" onClick={addAe}>
+            <Plus size={16} />Add AE
+          </button>
+        </div>
       </div>
       <div className="interface-split">
         <div className="interface-picker" aria-label="Aggregate Ethernet list">
