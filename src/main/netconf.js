@@ -67,7 +67,14 @@ function collectTagValues(text, tag) {
 
 function parseInventoryModel(inventoryXml) {
   const chassisBlock = inventoryXml.match(/<chassis[\s\S]*?<\/chassis>/i)?.[0] || inventoryXml;
-  return parseTag(chassisBlock, "description") || parseTag(chassisBlock, "name");
+  const chassisDescription = parseTag(chassisBlock, "description");
+  if (chassisDescription && !/^virtual\s+chassis$/i.test(chassisDescription.trim())) {
+    return chassisDescription;
+  }
+  const memberModel = collectBlocks(inventoryXml, "chassis-module")
+    .map((block) => parseTag(block, "description"))
+    .find((description) => /^ex/i.test(description || ""));
+  return memberModel || chassisDescription || parseTag(chassisBlock, "name");
 }
 
 function parseRpcError(response) {
@@ -518,7 +525,6 @@ function parseVirtualChassisConfig(configXml) {
       memberId: parseTag(block, "name"),
       serialNumber: parseTag(block, "serial-number"),
       role: parseTag(block, "role") || "line-card",
-      mastershipPriority: parseTag(block, "mastership-priority"),
       modified: false
     })).filter((member) => member.memberId),
     modified: false
