@@ -1,6 +1,6 @@
 {
   "name": "mini-jweb-ex",
-  "version": "0.6.0-beta.3",
+  "version": "0.6.0-beta.4-rc1",
   "description": "Local desktop prototype for configuring Juniper EX switches with a simplified J-Web style GUI.",
   "author": {
     "name": "Pichan Pratummal"

@@ -403,7 +403,39 @@ function virtualChassisModeLabel(snapshot) {
   if (mode === "higig") {
     return "HiGig / Non-HGoE";
   }
-  return "Unknown";
+  if (mode === "enabled") {
+    return "Enabled / Non-HGoE platform";
+  }
+  return snapshot?.virtualChassis?.raw ? "Unknown from switch output" : "Not detected";
+}
+
+function portSpeedOptionsForInterface(model = "", interfaceName = "") {
+  const normalized = String(model || "").toLowerCase();
+  const parts = portParts(interfaceName);
+  const port = Number(parts.port);
+  if ((/^ex4650/.test(normalized) || /^qfx5120-48y/.test(normalized)) && parts.pic === "0") {
+    if (port >= 0 && port <= 47) {
+      return {
+        profile: "group4-front-sfp28",
+        options: ["", "1g", "10g", "25g"],
+        note: `Ports ${Math.floor(port / 4) * 4}-${Math.floor(port / 4) * 4 + 3} share one speed group.`
+      };
+    }
+    if (port >= 48) {
+      return {
+        profile: "uplink-qsfp28",
+        options: ["", "40g", "100g"],
+        note: "QSFP uplinks support 40G or 100G. Verify channelized subports before changing speed."
+      };
+    }
+  }
+  if (/^ex4400-48f/.test(normalized) && parts.pic === "0") {
+    return { profile: "sfp-1g-10g", options: ["", "1g", "10g"], note: "EX4400-48F SFP/SFP+ ports support 1G or 10G depending on optics." };
+  }
+  if (/^ex4400-24x/.test(normalized) && parts.pic === "0") {
+    return { profile: "sfpplus-1g-10g", options: ["", "1g", "10g"], note: "EX4400-24X front SFP+ ports support 1G or 10G optics." };
+  }
+  return null;
 }
 
 function eligibleVcPortsForModel(deviceInfo, deviceSnapshot) {
@@ -562,10 +594,18 @@ function hgoeRequirementForModel(model = "") {
       supported: true,
       minimum: "22.3R1",
       defaultMode: "HiGig",
-      note: "EX4400 supports HGoE from Junos OS 22.3R1."
+      note: "EX4400 supports HGoE from Junos OS 22.3R1 when the installed hardware provides HGoE-capable VC/uplink ports; verify the module before changing mode."
     };
   }
-  if (/^ex4000|^ex4650/.test(normalized)) {
+  if (/^qfx5120-48ym/.test(normalized)) {
+    return {
+      supported: true,
+      minimum: "23.1R1",
+      defaultMode: "HGoE",
+      note: "QFX5120-48YM uses HGoE for Virtual Chassis workflows; verify QFX-specific limitations before deployment."
+    };
+  }
+  if (/^ex4000|^ex4650|^qfx5110|^qfx5120-48y/.test(normalized)) {
     return {
       supported: false,
       minimum: "",
@@ -681,6 +721,8 @@ function newInterface(vlanName = "") {
     ipv4Mode: "static",
     ipAddresses: "",
     ipv6Addresses: "",
+    portSpeed: "",
+    speedProfile: "",
     stpEdge: false,
     bundleAe: "",
     modified: true,
@@ -864,9 +906,29 @@ function ConnectionPanel({ connection, setConnection, deviceInfo, connectToSwitc
 function Dashboard({ config, commands, errors, connectionProps, deviceSnapshot }) {
   const deviceInfo = connectionProps.deviceInfo;
   const environment = deviceInfo?.environment || {};
+  const environmentTable = (title, items = []) => (
+    <Section title={title} icon={Activity}>
+      <div className="environment-table">
+        <div className="environment-heading">
+          <span>Item</span>
+          <span>Status</span>
+          <span>Measurement</span>
+        </div>
+        {items.length ? items.map((item, index) => (
+          <div className="environment-row" key={`${title}-${item.item}-${index}`}>
+            <strong>{item.item}</strong>
+            <span className={`env-status ${statusTone(item.status) || String(item.status).toLowerCase()}`}>{item.status || "-"}</span>
+            <small>{item.measurement || "-"}</small>
+          </div>
+        )) : (
+          <div className="environment-empty muted">No {title.toLowerCase()} data loaded.</div>
+        )}
+      </div>
+    </Section>
+  );
   return (
     <div className="dashboard-grid">
-      <Section title="Candidate Summary" icon={Activity}>
+      <Section title="Device Summary" icon={Activity}>
         <div className="summary-grid">
           <div><strong>{config.vlans.length}</strong><span>VLANs</span></div>
           <div><strong>{config.interfaces.length}</strong><span>Interfaces</span></div>
@@ -877,27 +939,14 @@ function Dashboard({ config, commands, errors, connectionProps, deviceSnapshot }
           <div><strong>{deviceInfo?.routingEngine?.cpuPercent ?? "-"}</strong><span>CPU %</span></div>
           <div><strong>{deviceInfo?.release || "-"}</strong><span>Firmware</span></div>
           <div><strong>{(config.spanningTree?.mode || "none").toUpperCase()}</strong><span>STP Mode</span></div>
-          <div className={statusTone(environment.fan)}><strong>{environment.fan || "-"}</strong><span>FAN</span></div>
+          <div className={statusTone(environment.fan)}><strong>{environment.fan || "-"}</strong><span>Fan</span></div>
           <div className={statusTone(environment.power)}><strong>{environment.power || "-"}</strong><span>Power</span></div>
           <div className={statusTone(environment.temperature)}><strong>{environment.temperature || "-"}</strong><span>Temperature</span></div>
         </div>
       </Section>
-      <Section title="Hardware Environment" icon={Activity}>
-        <div className="environment-list">
-          {[
-            ...(environment.powerItems || []).map((item) => ({ className: "Power", ...item })),
-            ...(environment.fanItems || []).map((item) => ({ className: "Fan", ...item })),
-            ...(environment.temperatureItems || []).map((item) => ({ className: "Temperature", ...item }))
-          ].map((item, index) => (
-            <div className="environment-item" key={`${item.className}-${item.item}-${index}`}>
-              <span>{item.className}</span>
-              <strong>{item.item}</strong>
-              <span className={`env-status ${statusTone(item.status) || String(item.status).toLowerCase()}`}>{item.status}</span>
-              <small>{item.measurement || "-"}</small>
-            </div>
-          ))}
-        </div>
-      </Section>
+      {environmentTable("Power", environment.powerItems || [])}
+      {environmentTable("Fan", environment.fanItems || [])}
+      {environmentTable("Temperature", environment.temperatureItems || [])}
       <Section title="Readiness" icon={CheckCircle2}>
         <div className="readiness">
           <div className={errors.length ? "pill warn" : "pill ok"}>{errors.length ? `${errors.length} validation issue(s)` : "Ready for commit-check"}</div>
@@ -938,6 +987,7 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
   const canRunHigigMode = connected && hgoe.supported && !busy;
   const canRunAnyVcAction = connected && selectedPort && !busy;
   const canRunPerPortVcAction = connected && hgoe.eligible && !busy;
+  const liveMemberCount = deviceSnapshot?.virtualChassis?.members?.length || 0;
 
   async function runVcAction({ action, confirmText, pendingText }) {
     const confirmed = window.confirm(confirmText);
@@ -1063,12 +1113,24 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
             />
             Enable preprovisioned mode
           </label>
+          <label className="checkline" title="Recommended for 2-member Virtual Chassis designs. Generates set virtual-chassis no-split-detection.">
+            <input
+              type="checkbox"
+              checked={Boolean(virtualChassis.noSplitDetection)}
+              onChange={(event) => setVirtualChassis({ noSplitDetection: event.target.checked })}
+            />
+            no-split-detection
+          </label>
           <button type="button" onClick={importCurrentMembers}>
             <RefreshCw size={16} />Import current members
           </button>
           <button type="button" onClick={addVcMember}>
             <Plus size={16} />Add member
           </button>
+        </div>
+        <div className={liveMemberCount === 2 ? "guidance-panel success" : "guidance-panel"}>
+          <strong>Split detection</strong>
+          <p>For a 2-member Virtual Chassis, Juniper recommends disabling split detection with <code>set virtual-chassis no-split-detection</code>. For 3 or more members, keep split detection enabled unless your design requires otherwise.</p>
         </div>
         <div className="table-wrap vc-member-table">
           <table>
@@ -1482,7 +1544,7 @@ function Vlans({ config, setConfig }) {
   );
 }
 
-function Interfaces({ config, setConfig, deviceSnapshot }) {
+function Interfaces({ config, setConfig, deviceSnapshot, deviceInfo }) {
   const [selectedName, setSelectedName] = useState("");
   const [selectedMember, setSelectedMember] = useState("all");
   const supportedPort = /^(ge|mge|xe|et|vcp)-/i;
@@ -1526,6 +1588,7 @@ function Interfaces({ config, setConfig, deviceSnapshot }) {
   const activeIndex = activeEntry?.index ?? -1;
   const activePort = portByName.get(activeName);
   const activeConfig = activeEntry?.item || { ...newInterface(defaultAccessVlan(config)), name: activeName, modified: false };
+  const activeSpeedProfile = portSpeedOptionsForInterface(deviceInfo?.model, activeName);
 
   const updateActive = (patch) => {
     if (!activeName) {
@@ -1635,8 +1698,26 @@ function Interfaces({ config, setConfig, deviceSnapshot }) {
                 <span className={`status-dot ${activePort?.operStatus === "up" ? "up" : activePort?.operStatus === "down" ? "down" : ""}`} />
                 <span>Admin {activePort?.adminStatus || "unknown"}</span>
                 <span>Link {activePort?.operStatus || "unknown"}</span>
+                <span>Speed {activePort?.speed || "unknown"}</span>
                 <span>{activeIndex >= 0 ? "Candidate loaded" : "No local candidate yet"}</span>
               </div>
+
+              {activeSpeedProfile ? (
+                <div className="guidance-panel interface-speed-panel">
+                  <strong>Port Speed</strong>
+                  <p>{activeSpeedProfile.note} Changing speed may flap the port and should be applied with Commit Confirm.</p>
+                  <Field label="Configured speed">
+                    <select
+                      value={activeConfig.portSpeed || ""}
+                      onChange={(event) => updateActive({ portSpeed: event.target.value, speedProfile: activeSpeedProfile.profile })}
+                    >
+                      {activeSpeedProfile.options.map((speed) => (
+                        <option key={speed || "auto"} value={speed}>{speed ? speed.toUpperCase() : "No speed change"}</option>
+                      ))}
+                    </select>
+                  </Field>
+                </div>
+              ) : null}
 
               <div className="form-grid compact-grid">
                 <Field label={<span className="label-with-help">Bundle to LAG <HelpTip text="Enter the AE/LAG number that already exists. For ae0, enter 0. Use the same number you created in Aggregate Ethernet." /></span>}>
@@ -2986,7 +3067,7 @@ function App() {
     virtualChassis: <VirtualChassis config={config} setConfig={setCandidateConfig} deviceInfo={deviceInfo} connection={connection} deviceSnapshot={deviceSnapshot} />,
     monitoring: <Monitoring connection={connection} />,
     vlans: <Vlans config={config} setConfig={setCandidateConfig} />,
-    interfaces: <Interfaces config={config} setConfig={setCandidateConfig} deviceSnapshot={deviceSnapshot} />,
+    interfaces: <Interfaces config={config} setConfig={setCandidateConfig} deviceSnapshot={deviceSnapshot} deviceInfo={deviceInfo} />,
     aggregate: <AggregateEthernet config={config} setConfig={setCandidateConfig} />,
     spanningTree: <SpanningTree config={config} setConfig={setCandidateConfig} />,
     irb: <Irb config={config} setConfig={setCandidateConfig} />,
@@ -3034,7 +3115,6 @@ function App() {
             Disconnect
           </button>
           <span>{dirty ? "Pending changes" : "Committed"}</span>
-          <span>{commands.length} commands</span>
           {firstValidationError ? <span className="top-error" title={errors.join("\n")}>{firstValidationError}</span> : null}
           {topCommitStatus ? <span>{topCommitStatus}</span> : null}
           <button onClick={refreshFromSwitch} disabled={topRefreshBusy}>
@@ -3044,10 +3124,6 @@ function App() {
           <button onClick={revertCandidate} disabled={topCommitBusy}>
             <RotateCcw size={15} />
             Revert
-          </button>
-          <button onClick={() => runTopCommit("check")} disabled={topCommitBusy || commands.length === 0 || errors.length > 0} title={commitBlockedReason}>
-            <ClipboardCheck size={15} />
-            Check
           </button>
           <button onClick={() => runTopCommit("confirm")} disabled={topCommitBusy || commands.length === 0 || errors.length > 0} title={commitBlockedReason}>
             <ClipboardCheck size={15} />

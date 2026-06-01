@@ -106,8 +106,9 @@ function isLikelyJunos(osName, release) {
   return haystack.includes("junos") || /\d+\.\d+[rx]/i.test(String(release || ""));
 }
 
-function isExModel(model) {
-  return /^ex/i.test(String(model || "").trim());
+function isSupportedSwitchModel(model) {
+  const normalized = String(model || "").trim().toLowerCase();
+  return /^ex/.test(normalized) || /^qfx(?:5110|5120)/.test(normalized);
 }
 
 function parseRoutingEngine(text) {
@@ -517,10 +518,11 @@ function hasLeaf(block, tag) {
 function parseVirtualChassisConfig(configXml) {
   const vcBlock = firstConfigBlock(configXml, "virtual-chassis");
   if (!vcBlock) {
-    return { preprovisioned: false, members: [], modified: false };
+    return { preprovisioned: false, noSplitDetection: false, members: [], modified: false };
   }
   return {
     preprovisioned: hasLeaf(vcBlock, "preprovisioned"),
+    noSplitDetection: hasLeaf(vcBlock, "no-split-detection"),
     members: collectBlocks(vcBlock, "member").map((block) => ({
       memberId: parseTag(block, "name"),
       serialNumber: parseTag(block, "serial-number"),
@@ -729,6 +731,8 @@ function parseVirtualChassisStatus(text) {
     mode = "hgoe";
   } else if (/\bhigig\b|hi-gig|high-gig/i.test(output)) {
     mode = "higig";
+  } else if (/virtual\s+chassis\s+mode:\s*enabled/i.test(output)) {
+    mode = "enabled";
   }
   const members = [];
   output.split(/\r?\n/).forEach((line) => {
@@ -1137,10 +1141,10 @@ async function connectAndInspect(connection) {
     const release = parseTag(software, "junos-version") || parseTag(software, "package-information");
     const model = parseInventoryModel(inventory);
     const junos = isLikelyJunos(osName, release);
-    const ex = isExModel(model);
+    const supportedModel = isSupportedSwitchModel(model);
 
     return {
-      ok: junos && ex,
+      ok: junos && supportedModel,
       osName,
       release,
       model,
@@ -1148,7 +1152,7 @@ async function connectAndInspect(connection) {
       environment: parseEnvironment(environment),
       warnings: [
         junos ? "" : "Device software does not look like Junos OS from NETCONF system information.",
-        ex ? "" : "Hardware model does not look like a Juniper EX switch. This prototype is intentionally scoped to EX."
+        supportedModel ? "" : "Hardware model is outside the current Mini J-Web EX/QFX support list."
       ].filter(Boolean)
     };
   });

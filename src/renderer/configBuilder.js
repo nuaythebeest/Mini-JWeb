@@ -15,6 +15,7 @@ const FQDN_OR_IP = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
 const TIME_ZONE = /^[A-Za-z_]+\/[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)?$/;
 const VC_SERIAL = /^[A-Za-z0-9_-]+$/;
 const VC_ROLES = new Set(["routing-engine", "line-card"]);
+const PORT_SPEEDS = new Set(["1g", "10g", "25g", "40g", "100g"]);
 
 function irbHasDhcpServices(irb = {}) {
   return Boolean(irb.dhcpServer?.enabled || irb.dhcpRelay?.enabled);
@@ -155,6 +156,9 @@ export function validateConfig(config) {
   config.interfaces.filter((item) => item.modified !== false).forEach((item, index) => {
     if (!IFACE_NAME.test(item.name || "")) {
       errors.push(`Interface ${index + 1}: enter an EX interface such as ge-0/0/1 or xe-0/1/0.`);
+    }
+    if (item.portSpeed && !PORT_SPEEDS.has(String(item.portSpeed).toLowerCase())) {
+      errors.push(`${item.name || `Interface ${index + 1}`}: port speed must be 1g, 10g, 25g, 40g, or 100g.`);
     }
     if (item.bundleAe) {
       if (!AE_NUMBER.test(String(item.bundleAe))) {
@@ -750,6 +754,11 @@ export function buildSetCommands(config) {
   });
 
   if (virtualChassis.modified !== false) {
+    if (virtualChassis.noSplitDetection) {
+      commands.push("set virtual-chassis no-split-detection");
+    } else {
+      commands.push("delete virtual-chassis no-split-detection");
+    }
     if (virtualChassis.preprovisioned) {
       commands.push("set virtual-chassis preprovisioned");
       (virtualChassis.members || []).forEach((member) => {
@@ -760,6 +769,27 @@ export function buildSetCommands(config) {
       commands.push("delete virtual-chassis preprovisioned");
     }
   }
+
+  config.interfaces.filter((item) => item.modified !== false && item.portSpeed).forEach((item) => {
+    const match = String(item.name || "").match(/^[a-z]+-(\d+)\/(\d+)\/(\d+)/i);
+    if (!match) {
+      return;
+    }
+    const [, fpc, pic, port] = match;
+    const speed = String(item.portSpeed).toLowerCase();
+    const portNumber = Number(port);
+    const groupedSpeed = String(item.speedProfile || "").includes("group4")
+      && Number.isInteger(portNumber)
+      && portNumber >= 0
+      && portNumber <= 47
+      && ["1g", "10g", "25g"].includes(speed);
+    const targetPorts = groupedSpeed
+      ? Array.from({ length: 4 }, (_unused, offset) => Math.floor(portNumber / 4) * 4 + offset)
+      : [portNumber];
+    targetPorts.forEach((targetPort) => {
+      commands.push(`set chassis fpc ${fpc} pic ${pic} port ${targetPort} speed ${speed}`);
+    });
+  });
 
   if (config.management.modified !== false && config.management.enabled) {
     commands.push("set system management-instance");
@@ -935,6 +965,7 @@ export const defaultConfig = {
   },
   virtualChassis: {
     preprovisioned: false,
+    noSplitDetection: false,
     members: [],
     modified: false
   },
