@@ -1,65 +1,114 @@
-# Mini J-Web EX Windows
+# Mini J-Web EX
 
-Mini J-Web EX Windows is a local Electron desktop application for configuring Juniper EX switches with a simplified J-Web-style GUI.
+Mini J-Web EX is a local Electron desktop application for configuring Juniper EX switches, with selected QFX compatibility checks, through a simplified J-Web-style GUI.
 
-Current beta: `0.5.0-beta.11`
+Current release candidate: `0.6.0-beta.4-rc1`
 
-The app pulls a snapshot from the switch, keeps the candidate configuration local while the user edits forms, and contacts the switch again only for refresh, operational tools, commit-check, commit confirmed, commit, or candidate revert.
+Latest GitHub release:
+[Mini J-Web EX 0.6.0-beta.4 RC1](https://github.com/nuaythebeest/Mini-JWeb/releases/tag/v0.6.0-beta.4-rc1)
 
-## Prototype Scope
+The app connects to a switch, pulls a snapshot, keeps candidate edits local in the GUI, and sends changes only when the user runs refresh, operational tools, commit check, commit confirmed, commit, or candidate revert.
 
-- Device access over NETCONF/SSH
-- Dashboard with model, firmware, CPU, fan, power, temperature, and hardware environment details
-- Front-panel port status with EX4100-48MP MultiGigabit/uplink awareness
-- VLAN creation
-- Ethernet switching interfaces in access or trunk mode
-- Layer 3 interfaces with IPv4 static, IPv4 DHCP, and IPv6 addressing
-- Voice VLAN configuration
-- LLDP and LLDP-MED
-- Aggregate Ethernet with LACP
-- RSTP and VSTP
-- Static routes
-- `mgmt_junos` management VRF for out-of-band management
-- IRB interface creation and VLAN association
-- DHCP server and DHCP relay under IRB workflow
-- System settings, reboot, ping, traceroute, user creation, and revert timer tools
-- Firmware upgrade workflow with local file selection, SFTP upload to `/var/tmp`, storage/SFTP pre-checks, install output, reboot, and alternate slice snapshot
-- Monitoring outputs for VLAN, route, ARP, DHCP bindings, LACP, and spanning tree
-- Preview and export of generated Junos `set` commands
-- NETCONF commit-check, commit confirmed, and commit
+## Downloads
 
-## Protocol Choice
+The RC1 release includes:
 
-The prototype uses NETCONF over SSH on TCP port 830.
+- Windows x64 installer: `Mini.J-Web.EX.Windows.Setup.0.6.0-beta.4-rc1-x64.exe`
+- macOS Apple Silicon DMG: `Mini.J-Web.EX.Windows-0.6.0-beta.4-rc1-arm64.dmg`
 
-NETCONF is a good fit for Junos because it supports candidate configuration workflows, commit-check, commit, lock, and unlock. This keeps the GUI fast because the app does not query Junos after every field edit.
+Installers are currently unsigned, so Windows/macOS may warn that the publisher is unknown.
 
 ## Switch Prerequisites
 
-Enable NETCONF over SSH on the EX switch:
+Enable NETCONF over SSH before using the application:
 
 ```text
 set system services netconf ssh
 commit
 ```
 
-The application verifies that the connected target reports Junos and an EX model before showing the device as ready. Current beta focus is EX Series, which runs Junos OS on Broadcom-based switching hardware.
+The application uses NETCONF over SSH on TCP port `830` by default.
 
-The generated voice VLAN syntax uses ELS-style Junos EX syntax:
+For Firmware Upgrade upload support, SFTP must also be enabled under SSH:
 
 ```text
-set switch-options voip interface ge-0/0/2.0 vlan voice-vlan
+set system services ssh sftp-server
+commit check
+commit confirmed 5
 ```
 
-## Next Version Virtual Chassis Requirements
+## Current Feature Set
 
-- Show the HGoE minimum release before offering HGoE mode-change actions. For EX4100 and EX4100-F, warn when the connected switch is below Junos OS `24.2R1`.
-- In non-HGoE/HiGig mode, warn that changing VC ports to network-port mode is not a flexible one-port conversion. Treat it as an all-port/group mode change that can leave the switch without usable VCP links.
-- HGoE/HiGig mode changes require reboot and should always show the exact Junos request command before confirmation.
-- Firmware Upgrade must verify SFTP readiness before upload. If disabled, offer to commit `set system services ssh sftp-server`, then offer `delete system services ssh sftp-server` after the upgrade if required by policy.
-- Firmware Upgrade must check `/var/tmp` free space and offer `request system storage cleanup no-confirm` before uploading a local Junos package.
-- Firmware Upgrade must check whether `/var/tmp/<package>` already exists before uploading. If present, let the user skip upload and proceed to install the existing file, or explicitly choose overwrite.
-- Firmware Upgrade offers an opt-in `no-validate` install mode for cases where Junos explicitly reports validation failure and recommends `no-validate`, for example `request system software add no-validate /var/tmp/<package>.tgz`.
+- Device profiles with host, NETCONF port, username, password, and remember option
+- Top-bar connection status, profile selection, connect, disconnect, refresh, revert, commit confirmed, and commit
+- Dashboard with device summary, CPU, firmware, live port/VLAN counts, and separate Power, Fan, and Temperature sections
+- Front-panel port view with two-row physical layout and VCP coloring
+- Ports menu with search/filter by interface, member/FPC, link state, VLAN, or VCP
+- VLAN creation, editing, deletion, and dependency warnings
+- Interface configuration for access, trunk, Layer 3, voice VLAN, LLDP-MED, edge port, MTU, native VLAN, IPv4, and IPv6
+- Member/FPC dropdown in the Interfaces menu for Virtual Chassis scale
+- Aggregate Ethernet and LACP configuration
+- Spanning Tree: RSTP, VSTP, bridge priority, BPDU block on edge, and edge-interface reflection
+- IRB creation with optional unit rows, VLAN association, DHCP server, and DHCP relay
+- Static routes with `default` or `mgmt_junos` routing-instance dropdown
+- Management tools for OOB management, system settings, reboot, ping, traceroute, user creation, and commit-confirm timer
+- Firmware Upgrade workflow with local file selection, SFTP pre-check, `/var/tmp` file-exists guardrail, overwrite option, storage cleanup, install log, `no-validate` option, reboot prompt, and alternate-slice snapshot
+- Virtual Chassis workflow with current mode display, HGoE guardrails, preprovisioning, member model dropdown, VCP/network conversion actions, and `no-split-detection` option
+- Monitoring tabs for VLAN, route, ARP, DHCP bindings, LACP, and spanning tree
+- Commit preview, active configuration view, export set file, commit check, commit confirmed, and commit
+
+## Supported and Sanity-Checked Platforms
+
+Mini J-Web EX is currently focused on Junos OS campus/access switching workflows.
+
+Sanity-checked so far:
+
+- EX2300 / EX2300-C
+- EX3400
+- EX4100
+- EX4300
+- EX4650
+- QFX5110
+
+Current platform notes:
+
+- EX3400 rear layout is treated as PIC 1 `2x40G QSFP` plus PIC 2 `4x10G SFP/SFP+`.
+- EX4300 Virtual Chassis testing covered real two-member VC workflow and preprovisioning behavior.
+- EX4650 and QFX5120-48Y share related hardware behavior, but the app should derive the workflow from software/model identity, not chassis string alone.
+- QFX5110/QFX5120 are Junos OS, not Junos EVO, but QFX workflows are still treated as selected compatibility support rather than full EX-equivalent support.
+
+## Virtual Chassis Notes
+
+The Virtual Chassis menu includes:
+
+- Current mode display: HGoE, HiGig / Non-HGoE, or enabled/non-HGoE platform
+- HGoE minimum-version guardrails
+- HGoE and HiGig mode-change actions with reboot confirmation
+- Per-port VCP conversion where supported
+- Non-HGoE warning that conversion may affect the full VCP group rather than one flexible port
+- Preprovisioning with member ID, serial number, model, and role
+- `no-split-detection` checkbox, recommended for two-member Virtual Chassis designs when appropriate
+
+Generated candidate configuration should still be applied with commit safety:
+
+```text
+commit check
+commit confirmed 5
+```
+
+## Firmware Upgrade Notes
+
+Firmware Upgrade performs a staged workflow:
+
+1. Select a local Junos package.
+2. Run pre-check for SFTP and `/var/tmp` storage.
+3. Check whether the package already exists in `/var/tmp`.
+4. Upload, skip upload, or overwrite intentionally.
+5. Run `request system software add`.
+6. Show upgrade output and highlight `Upgrade Complete - Reboot Required`.
+7. Offer reboot and `request system snapshot slice alternate` after the new version boots correctly.
+
+The `no-validate` option is available only as an explicit operator choice for cases where Junos validation fails and recommends it.
 
 ## Local Development
 
@@ -75,30 +124,37 @@ Build the renderer:
 npm run build
 ```
 
-Run the desktop app after building:
-
-```bash
-npm start
-```
-
 Run in development mode:
 
 ```bash
 npm run dev
 ```
 
-## Package for Customers
+Run the built desktop app:
 
-Build a Windows x64 installer:
+```bash
+npm start
+```
+
+## Packaging
+
+Build macOS Apple Silicon DMG:
+
+```bash
+npm run package:mac
+```
+
+Build Windows x64 installer:
 
 ```bash
 npm run package:win
 ```
 
-Generated installers are written to `release/`.
+Generated packages are written to `release/`.
 
 ## Security Notes
 
-- The username and password are passed from the renderer to the Electron main process only when the user verifies, commit-checks, or commits.
-- Credentials are not persisted to disk by this prototype.
-- For production, add certificate/host-key trust controls and optional credential vault integration before customer deployment.
+- Credentials are handled locally by the Electron app.
+- Saved profiles are intended for lab/operator convenience on the local computer.
+- Installers are not code-signed yet.
+- Production distribution should add proper code signing and stronger host-key trust controls.
