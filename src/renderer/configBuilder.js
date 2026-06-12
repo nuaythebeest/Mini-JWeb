@@ -249,11 +249,13 @@ export function validateConfig(config) {
   }
 
   config.irbs.filter(irbHasConfig).forEach((irb, index) => {
-    const unit = Number(irb.unit);
-    if (!Number.isInteger(unit) || unit < 0 || unit > 16384) {
+    const unitValue = String(irb.unit || "").trim();
+    const unit = Number(unitValue);
+    const address = String(irb.address || "").trim();
+    if (!unitValue || !Number.isInteger(unit) || unit < 0 || unit > 16384) {
       errors.push(`IRB ${index + 1}: unit must be a positive number.`);
     }
-    if (irb.address && !CIDR.test(irb.address || "")) {
+    if (address && !CIDR.test(address)) {
       errors.push(`IRB ${irb.unit || index + 1}: address must be CIDR format, for example 192.0.2.1/24.`);
     }
     validateMtu(irb.mtu, `IRB ${irb.unit || index + 1}`, errors);
@@ -509,17 +511,25 @@ export function buildSetCommands(config) {
   });
 
   config.irbs.filter((irb) => irb.modified !== false && irbHasConfig(irb)).forEach((irb) => {
-    const irbName = `irb.${irb.unit}`;
-    if (irb.address) {
-      commands.push(`delete interfaces irb unit ${irb.unit} family inet dhcp`);
-      commands.push(`delete interfaces irb unit ${irb.unit} family inet address`);
-      commands.push(`set interfaces irb unit ${irb.unit} family inet address ${irb.address}`);
+    const unit = String(irb.unit || "").trim();
+    if (!unit) {
+      return;
+    }
+    const irbName = `irb.${unit}`;
+    const previousAddress = String(irb.previousAddress || "").trim();
+    const address = String(irb.address || "").trim();
+    if (previousAddress && previousAddress !== address) {
+      commands.push(`delete interfaces irb unit ${unit} family inet address ${previousAddress}`);
+    }
+    if (address) {
+      commands.push(`delete interfaces irb unit ${unit} family inet dhcp`);
+      commands.push(`set interfaces irb unit ${unit} family inet address ${address}`);
     }
     if (irb.mtu) {
-      commands.push(`set interfaces irb unit ${irb.unit} family inet mtu ${irb.mtu}`);
+      commands.push(`set interfaces irb unit ${unit} family inet mtu ${irb.mtu}`);
     }
     if (irb.description) {
-      commands.push(`set interfaces irb unit ${irb.unit} description "${irb.description.replace(/"/g, '\\"')}"`);
+      commands.push(`set interfaces irb unit ${unit} description "${irb.description.replace(/"/g, '\\"')}"`);
     }
     if (irb.vlan) {
       commands.push(`set vlans ${irb.vlan} l3-interface ${irbName}`);
@@ -898,6 +908,7 @@ export function configFromSnapshot(snapshot, previousConfig = defaultConfig) {
     interfaces: physicalInterfaces.map((item) => interfaceFromSnapshot(item, edgeInterfaces)),
     irbs: (snapshot.irbs || []).map((irb) => ({
       ...irb,
+      previousAddress: irb.address || "",
       dhcpServer: { enabled: false, poolName: "", network: "", rangeLow: "", rangeHigh: "", router: "", dns: "", ...(irb.dhcpServer || {}) },
       dhcpRelay: { enabled: false, servers: "", ...(irb.dhcpRelay || {}) },
       modified: false

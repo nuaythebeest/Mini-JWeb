@@ -2,21 +2,21 @@
 
 Mini J-Web EX is a local Electron desktop application for configuring Juniper EX switches, with selected QFX compatibility checks, through a simplified J-Web-style GUI.
 
-Current release: `0.6.0-beta.5`
+Current release: `0.6.0-beta.6`
 
 Latest GitHub release:
-[Mini J-Web EX 0.6.0-beta.5](https://github.com/nuaythebeest/Mini-JWeb/releases/tag/v0.6.0-beta.5)
+[Mini J-Web EX 0.6.0-beta.6](https://github.com/nuaythebeest/Mini-JWeb/releases/tag/v0.6.0-beta.6)
 
 The app connects to a switch, pulls a snapshot, keeps candidate edits local in the GUI, and sends changes only when the user runs refresh, operational tools, commit check, commit confirmed, commit, or candidate revert.
 
-The `0.6.0-beta.5` release introduces a Mist-inspired QoL redesign with a collapsible navigation rail, clearer device identity, bundled Open Sans typography, and consistent controls across the application.
+The `0.6.0-beta.6` release includes the Mist-inspired QoL redesign plus an IRB hotfix that prevents invalid Junos address delete commands during commit.
 
 ## Downloads
 
 The current release includes:
 
-- Windows x64 installer: `Mini J-Web EX Setup 0.6.0-beta.5-x64.exe`
-- macOS Apple Silicon DMG: `Mini J-Web EX-0.6.0-beta.5-arm64.dmg`
+- Windows x64 installer: `Mini J-Web EX Setup 0.6.0-beta.6-x64.exe`
+- macOS Apple Silicon DMG: `Mini J-Web EX-0.6.0-beta.6-arm64.dmg`
 
 Installers are currently unsigned, so Windows/macOS may warn that the publisher is unknown.
 

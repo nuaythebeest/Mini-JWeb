@@ -315,6 +315,7 @@ function newIrb() {
     unit: "",
     vlan: "",
     address: "",
+    previousAddress: "",
     mtu: "",
     description: "",
     dhcpServer: { enabled: false, poolName: "", network: "", rangeLow: "", rangeHigh: "", router: "", dns: "" },
