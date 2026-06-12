@@ -15,6 +15,8 @@ import {
   List,
   LogOut,
   Lock,
+  PanelLeftClose,
+  PanelLeftOpen,
   Network,
   Plus,
   Power,
@@ -22,9 +24,11 @@ import {
   RotateCcw,
   Route,
   Save,
+  Settings,
   ShieldCheck,
   Terminal,
   Trash2,
+  X,
   Upload
 } from "lucide-react";
 import { buildSetCommands, configFromSnapshot, defaultConfig, validateConfig } from "./configBuilder";
@@ -111,6 +115,7 @@ const forwardingClasses = ["", "best-effort", "assured-forwarding", "expedited-f
 const bridgePriorities = Array.from({ length: 16 }, (_, index) => String(index * 4096));
 const credentialsStorageKey = "mini-jweb-ex-connection";
 const deviceProfilesStorageKey = "mini-jweb-ex-device-profiles";
+const navigationCollapsedStorageKey = "mini-jweb-ex-navigation-collapsed";
 
 function blankConnection() {
   return { host: "", port: "830", username: "", password: "", remember: false };
@@ -159,6 +164,20 @@ function upsertDeviceProfile(profiles, profile) {
   const key = profileKey(normalized);
   const next = profiles.filter((item) => profileKey(item) !== key);
   return [normalized, ...next].slice(0, 12);
+}
+
+function actionStatusTone(message = "") {
+  const value = String(message || "").toLowerCase();
+  if (!value) {
+    return "info";
+  }
+  if (/failed|error|warning|cancelled|canceled/.test(value)) {
+    return "error";
+  }
+  if (/running|refreshing|reverting|loading|connecting/.test(value)) {
+    return "info";
+  }
+  return "success";
 }
 
 function initialConnection() {
@@ -905,6 +924,7 @@ function ConnectionPanel({ connection, setConnection, deviceInfo, connectToSwitc
 
 function Dashboard({ config, commands, errors, connectionProps, deviceSnapshot }) {
   const deviceInfo = connectionProps.deviceInfo;
+  const connection = connectionProps.connection;
   const environment = deviceInfo?.environment || {};
   const environmentTable = (title, items = []) => (
     <Section title={title} icon={Activity}>
@@ -927,7 +947,23 @@ function Dashboard({ config, commands, errors, connectionProps, deviceSnapshot }
     </Section>
   );
   return (
-    <div className="dashboard-grid">
+    <div className="dashboard-page">
+      <section className="device-identity">
+        <div className="device-identity-primary">
+          <span className={deviceInfo?.ok ? "status-dot up" : "status-dot"} />
+          <div>
+            <span>{deviceInfo?.ok ? "Connected device" : "Device identity"}</span>
+            <strong>{deviceInfo?.model || "Not connected"}</strong>
+          </div>
+        </div>
+        <dl>
+          <div><dt>Hostname</dt><dd>{deviceInfo?.hostname || "-"}</dd></div>
+          <div><dt>Host</dt><dd>{connection?.host || "-"}</dd></div>
+          <div><dt>Junos version</dt><dd>{deviceInfo?.release || "-"}</dd></div>
+          <div><dt>Serial number</dt><dd>{deviceInfo?.serialNumber || "-"}</dd></div>
+          <div><dt>Uptime</dt><dd>{deviceInfo?.routingEngine?.uptime || "-"}</dd></div>
+        </dl>
+      </section>
       <Section title="Device Summary" icon={Activity}>
         <div className="summary-grid">
           <div><strong>{config.vlans.length}</strong><span>VLANs</span></div>
@@ -1328,7 +1364,6 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
       port?.operStatus,
       port?.proto,
       port?.local,
-      port?.remote,
       port?.vcp ? "vcp" : "",
       port?.vcp?.status,
       port?.vcp?.neighbor,
@@ -1426,7 +1461,6 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
                 <th>Link</th>
                 <th>Proto</th>
                 <th>Local</th>
-                <th>Remote</th>
                 <th>Configuration</th>
               </tr>
             </thead>
@@ -1458,13 +1492,12 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
                     <td>{port?.operStatus || "candidate"}</td>
                     <td>{port?.proto || ""}</td>
                     <td>{port?.local || ""}</td>
-                    <td>{port?.remote || ""}</td>
                     <td><span className="muted config-summary" title={fullConfigSummary}>{configSummary}</span></td>
                   </tr>
                 );
               })}
               {tableNames.length === 0 ? (
-                <tr><td colSpan="7" className="empty-state">No ports match the current filter.</td></tr>
+                <tr><td colSpan="6" className="empty-state">No ports match the current filter.</td></tr>
               ) : null}
             </tbody>
           </table>
@@ -2920,8 +2953,19 @@ function App() {
   const [topCommitStatus, setTopCommitStatus] = useState("");
   const [topCommitBusy, setTopCommitBusy] = useState(false);
   const [topRefreshBusy, setTopRefreshBusy] = useState(false);
+  const [navigationCollapsed, setNavigationCollapsed] = useState(() => localStorage.getItem(navigationCollapsedStorageKey) === "true");
+  const [profileManagerOpen, setProfileManagerOpen] = useState(false);
   const commands = useMemo(() => buildSetCommands(config), [config]);
   const errors = useMemo(() => validateConfig(config), [config]);
+  const topCommitTone = actionStatusTone(topCommitStatus);
+
+  useEffect(() => {
+    if (!topCommitStatus || topCommitTone !== "success") {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setTopCommitStatus(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [topCommitStatus, topCommitTone]);
 
   const setCandidateConfig = (nextConfig) => {
     setDirty(true);
@@ -3001,6 +3045,29 @@ function App() {
     setConnectionStatus(`Profile selected: ${profileLabel(profile)}.`);
   }
 
+  function deleteDeviceProfile(key) {
+    const profile = deviceProfiles.find((item) => profileKey(item) === key);
+    if (!profile) {
+      return;
+    }
+    const confirmed = window.confirm(`Delete saved profile?\n\n${profileLabel(profile)}`);
+    if (!confirmed) {
+      return;
+    }
+    const nextProfiles = deviceProfiles.filter((item) => profileKey(item) !== key);
+    setDeviceProfiles(nextProfiles);
+    saveDeviceProfiles(nextProfiles);
+    try {
+      const remembered = normalizeConnectionProfile(JSON.parse(localStorage.getItem(credentialsStorageKey) || "{}"));
+      if (profileKey(remembered) === key) {
+        localStorage.removeItem(credentialsStorageKey);
+      }
+    } catch (_error) {
+      localStorage.removeItem(credentialsStorageKey);
+    }
+    setConnectionStatus(`Deleted saved profile: ${profileLabel(profile)}.`);
+  }
+
   async function loadSwitchSnapshot(successMessage = "Refresh completed.", targetConnection = connection) {
     const result = await window.miniJweb.inspectDevice(targetConnection);
     setDeviceInfo(result);
@@ -3078,22 +3145,33 @@ function App() {
   }[active];
   const firstValidationError = errors[0] || "";
   const commitBlockedReason = firstValidationError || (commands.length === 0 ? "No pending configuration commands." : "");
+  const activeLabel = nav.find((item) => item.id === active)?.label || "Dashboard";
+
+  function toggleNavigation() {
+    const next = !navigationCollapsed;
+    localStorage.setItem(navigationCollapsedStorageKey, String(next));
+    setNavigationCollapsed(next);
+  }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${navigationCollapsed ? "navigation-collapsed" : ""}`}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">J</span>
           <div>
-            <strong>Mini J-Web EX Windows</strong>
-            <span>{deviceInfo?.model || "Local candidate builder"}</span>
+            <strong>Mini J-Web EX</strong>
+            <span>Network configuration</span>
           </div>
         </div>
-        <div className="top-status">
+        <div className="session-controls">
           <span className={deviceInfo?.ok ? "connection-pill connected" : "connection-pill disconnected"}>
-            {deviceInfo?.ok ? "Connected" : "Disconnected"}
+            <span className="status-dot" />
+            <span className="status-label">{deviceInfo?.ok ? "Connected" : "Disconnected"}</span>
           </span>
-          <span className="top-device">{deviceInfo?.hostname || connection.host || "No device"}{connection.host ? ` (${connection.host})` : ""}</span>
+          <span className="top-device">
+            <strong>{deviceInfo?.hostname || connection.host || "No device"}</strong>
+            <small>{deviceInfo?.model || (connection.host ? connection.host : "Select a saved profile")}</small>
+          </span>
           <select
             className="top-profile-select"
             value={deviceProfiles.some((profile) => profileKey(profile) === profileKey(connection)) ? profileKey(connection) : ""}
@@ -3106,32 +3184,75 @@ function App() {
               <option key={profileKey(profile)} value={profileKey(profile)}>{profileLabel(profile)}</option>
             ))}
           </select>
+          <div className="profile-manager">
+            <button
+              className="icon header-secondary"
+              onClick={() => setProfileManagerOpen((current) => !current)}
+              aria-label="Manage saved profiles"
+              aria-expanded={profileManagerOpen}
+              title="Manage saved profiles"
+            >
+              <Settings size={15} />
+            </button>
+            {profileManagerOpen ? (
+              <div className="profile-popover" role="dialog" aria-label="Saved profiles">
+                <div className="profile-popover-head">
+                  <strong>Saved Profiles</strong>
+                  <button className="icon" onClick={() => setProfileManagerOpen(false)} aria-label="Close saved profiles">
+                    <X size={14} />
+                  </button>
+                </div>
+                {deviceProfiles.length ? (
+                  <div className="profile-list">
+                    {deviceProfiles.map((profile) => {
+                      const key = profileKey(profile);
+                      return (
+                        <div className="profile-row" key={key}>
+                          <button className="profile-select" onClick={() => { selectDeviceProfile(key); setProfileManagerOpen(false); }}>
+                            <strong>{profile.host || "No host"}</strong>
+                            <span>NETCONF {profile.port || "830"}{profile.username ? ` | ${profile.username}` : ""}</span>
+                          </button>
+                          <button className="icon danger" onClick={() => deleteDeviceProfile(key)} aria-label={`Delete ${profileLabel(profile)}`} title="Delete saved profile">
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="profile-empty">No saved profiles.</div>
+                )}
+              </div>
+            ) : null}
+          </div>
           <button onClick={() => connectToSwitch(connection, { navigate: false })} disabled={connectionBusy || !connection.host}>
             <Lock size={15} />
-            Connect
+            <span className="action-label">Connect</span>
           </button>
           <button onClick={disconnectFromDevice} disabled={connectionBusy || !deviceInfo}>
             <LogOut size={15} />
-            Disconnect
+            <span className="action-label">Disconnect</span>
           </button>
-          <span>{dirty ? "Pending changes" : "Committed"}</span>
+        </div>
+        <div className="configuration-controls">
+          <span className={`candidate-state ${dirty ? "pending" : ""}`}>{dirty ? "Pending changes" : "Committed"}</span>
           {firstValidationError ? <span className="top-error" title={errors.join("\n")}>{firstValidationError}</span> : null}
-          {topCommitStatus ? <span>{topCommitStatus}</span> : null}
-          <button onClick={refreshFromSwitch} disabled={topRefreshBusy}>
+          {topCommitStatus ? <span className="top-action-status" title={topCommitStatus}>{topCommitStatus}</span> : null}
+          <button className="header-secondary" onClick={refreshFromSwitch} disabled={topRefreshBusy} title="Refresh from switch">
             <RefreshCw size={15} />
-            Refresh
+            <span className="action-label">Refresh</span>
           </button>
-          <button onClick={revertCandidate} disabled={topCommitBusy}>
+          <button className="header-secondary" onClick={revertCandidate} disabled={topCommitBusy} title="Revert candidate">
             <RotateCcw size={15} />
-            Revert
+            <span className="action-label">Revert</span>
           </button>
           <button onClick={() => runTopCommit("confirm")} disabled={topCommitBusy || commands.length === 0 || errors.length > 0} title={commitBlockedReason}>
             <ClipboardCheck size={15} />
-            Commit Confirm
+            <span className="action-label">Commit Confirm</span>
           </button>
           <button className={dirty ? "primary dirty" : "primary"} onClick={() => runTopCommit("commit")} disabled={topCommitBusy || commands.length === 0 || errors.length > 0} title={commitBlockedReason}>
             <Save size={15} />
-            Commit
+            <span className="action-label">Commit</span>
           </button>
         </div>
       </header>
@@ -3140,14 +3261,52 @@ function App() {
           {nav.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => setActive(item.id)}>
+              <button
+                key={item.id}
+                className={active === item.id ? "active" : ""}
+                onClick={() => setActive(item.id)}
+                title={navigationCollapsed ? item.label : undefined}
+                aria-label={item.label}
+              >
                 <Icon size={18} />
                 <span>{item.label}</span>
               </button>
             );
           })}
+          <button
+            className="navigation-toggle"
+            onClick={toggleNavigation}
+            title={navigationCollapsed ? "Expand navigation" : "Collapse navigation"}
+            aria-label={navigationCollapsed ? "Expand navigation" : "Collapse navigation"}
+            aria-expanded={!navigationCollapsed}
+          >
+            {navigationCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+            <span>{navigationCollapsed ? "Expand" : "Collapse"}</span>
+          </button>
         </aside>
-        <main>{screen}</main>
+        <main>
+          <div className="page-heading">
+            <div>
+              <span>Mini J-Web EX</span>
+              <h1>{activeLabel}</h1>
+            </div>
+            <span className={`page-state ${dirty ? "pending" : ""}`}>{dirty ? `${commands.length} pending command${commands.length === 1 ? "" : "s"}` : "Configuration synchronized"}</span>
+          </div>
+          {(firstValidationError || topCommitStatus) ? (
+            <div className={`page-status ${firstValidationError ? "error" : topCommitTone}`} role={firstValidationError || topCommitTone === "error" ? "alert" : "status"}>
+              <div>
+                <strong>{firstValidationError ? "Validation issue" : topCommitTone === "success" ? "Action completed" : topCommitTone === "error" ? "Action failed" : "Action status"}</strong>
+                <span>{firstValidationError || topCommitStatus}</span>
+              </div>
+              {topCommitStatus ? (
+                <button className="icon" onClick={() => setTopCommitStatus("")} aria-label="Dismiss status message">
+                  <X size={14} />
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {screen}
+        </main>
       </div>
     </div>
   );

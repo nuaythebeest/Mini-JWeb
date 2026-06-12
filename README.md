@@ -2,19 +2,21 @@
 
 Mini J-Web EX is a local Electron desktop application for configuring Juniper EX switches, with selected QFX compatibility checks, through a simplified J-Web-style GUI.
 
-Current release candidate: `0.6.0-beta.4-rc1`
+Current release: `0.6.0-beta.5`
 
 Latest GitHub release:
-[Mini J-Web EX 0.6.0-beta.4 RC1](https://github.com/nuaythebeest/Mini-JWeb/releases/tag/v0.6.0-beta.4-rc1)
+[Mini J-Web EX 0.6.0-beta.5](https://github.com/nuaythebeest/Mini-JWeb/releases/tag/v0.6.0-beta.5)
 
 The app connects to a switch, pulls a snapshot, keeps candidate edits local in the GUI, and sends changes only when the user runs refresh, operational tools, commit check, commit confirmed, commit, or candidate revert.
 
+The `0.6.0-beta.5` release introduces a Mist-inspired QoL redesign with a collapsible navigation rail, clearer device identity, bundled Open Sans typography, and consistent controls across the application.
+
 ## Downloads
 
-The RC1 release includes:
+The current release includes:
 
-- Windows x64 installer: `Mini.J-Web.EX.Windows.Setup.0.6.0-beta.4-rc1-x64.exe`
-- macOS Apple Silicon DMG: `Mini.J-Web.EX.Windows-0.6.0-beta.4-rc1-arm64.dmg`
+- Windows x64 installer: `Mini J-Web EX Setup 0.6.0-beta.5-x64.exe`
+- macOS Apple Silicon DMG: `Mini J-Web EX-0.6.0-beta.5-arm64.dmg`
 
 Installers are currently unsigned, so Windows/macOS may warn that the publisher is unknown.
 
@@ -151,6 +153,8 @@ npm run package:win
 ```
 
 Generated packages are written to `release/`.
+
+Post-RC1 builds use the product name `Mini J-Web EX`; existing RC1 installers may still show `Mini J-Web EX Windows` in artifact and shortcut names.
 
 ## Security Notes
 

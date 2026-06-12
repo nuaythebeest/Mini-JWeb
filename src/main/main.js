@@ -38,7 +38,10 @@ function runWindowsUninstall() {
   }
 
   const installDir = path.dirname(process.execPath);
-  const shortcutName = "Mini J-Web EX Windows.lnk";
+  const shortcutNames = [
+    "Mini J-Web EX.lnk",
+    "Mini J-Web EX Windows.lnk"
+  ];
   const shortcutFolders = [
     path.join(process.env.ProgramData || "C:\\ProgramData", "Microsoft", "Windows", "Start Menu", "Programs"),
     path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs"),
@@ -46,7 +49,9 @@ function runWindowsUninstall() {
     path.join(os.homedir(), "Desktop")
   ];
 
-  shortcutFolders.forEach((folder) => removeFileIfExists(path.join(folder, shortcutName)));
+  shortcutFolders.forEach((folder) => {
+    shortcutNames.forEach((shortcutName) => removeFileIfExists(path.join(folder, shortcutName)));
+  });
   uninstallRegistryKeys.forEach((key) => {
     deleteRegistryKey(key, "64");
     deleteRegistryKey(key, "32");
@@ -77,7 +82,7 @@ function createWindow() {
     minWidth: 1080,
     minHeight: 720,
     title: "Mini J-Web EX",
-    backgroundColor: "#f4f7f9",
+    backgroundColor: "#ffffff",
     webPreferences: {
       preload: path.join(__dirname, "../preload/preload.js"),
       contextIsolation: true,

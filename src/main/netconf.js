@@ -77,6 +77,15 @@ function parseInventoryModel(inventoryXml) {
   return memberModel || chassisDescription || parseTag(chassisBlock, "name");
 }
 
+function parseInventorySerial(inventoryXml) {
+  const chassisBlock = inventoryXml.match(/<chassis[\s\S]*?<\/chassis>/i)?.[0] || inventoryXml;
+  return parseTag(chassisBlock, "serial-number")
+    || collectBlocks(inventoryXml, "chassis-module")
+      .map((block) => parseTag(block, "serial-number"))
+      .find(Boolean)
+    || "";
+}
+
 function parseRpcError(response) {
   if (!/<(?:[A-Za-z_][\w.-]*:)?rpc-error/i.test(response)) {
     return null;
@@ -1137,17 +1146,21 @@ async function connectAndInspect(connection) {
     ]);
     await close();
 
-    const osName = parseTag(software, "host-name") || "Junos";
+    const hostname = parseTag(software, "host-name");
+    const osName = parseTag(software, "product-name") || "Junos";
     const release = parseTag(software, "junos-version") || parseTag(software, "package-information");
     const model = parseInventoryModel(inventory);
+    const serialNumber = parseInventorySerial(inventory);
     const junos = isLikelyJunos(osName, release);
     const supportedModel = isSupportedSwitchModel(model);
 
     return {
       ok: junos && supportedModel,
       osName,
+      hostname,
       release,
       model,
+      serialNumber,
       routingEngine: parseRoutingEngine(routingEngine),
       environment: parseEnvironment(environment),
       warnings: [
