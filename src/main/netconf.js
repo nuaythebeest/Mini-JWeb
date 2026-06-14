@@ -77,6 +77,15 @@ function parseInventoryModel(inventoryXml) {
   return memberModel || chassisDescription || parseTag(chassisBlock, "name");
 }
 
+function parseShowVersionIdentity(versionXml) {
+  const output = outputText(versionXml);
+  return {
+    hostname: output.match(/^Hostname:\s*(.+)$/im)?.[1]?.trim() || "",
+    model: output.match(/^Model:\s*(.+)$/im)?.[1]?.trim() || "",
+    release: output.match(/^Junos:\s*(.+)$/im)?.[1]?.trim() || ""
+  };
+}
+
 function parseInventorySerial(inventoryXml) {
   const chassisBlock = inventoryXml.match(/<chassis[\s\S]*?<\/chassis>/i)?.[0] || inventoryXml;
   return parseTag(chassisBlock, "serial-number")
@@ -242,6 +251,145 @@ function interfaceCoordinates(interfaceName) {
     port: match[3],
     key: `${match[1]}/${match[2]}/${match[3]}`
   };
+}
+
+function physicalSwitchPortName(interfaceName) {
+  const name = physicalName(interfaceName);
+  return /^(?:ge|mge|xe|et)-\d+\/\d+\/\d+$/i.test(name) ? name : "";
+}
+
+function speedPrefix(speed = "") {
+  return { "1g": "ge", "10g": "xe", "25g": "et" }[String(speed || "").toLowerCase()] || "";
+}
+
+function chassisSpeedPrefixForCoordinates(chassisSpeedSettings = [], coordinates) {
+  if (!coordinates) {
+    return "";
+  }
+  const port = Number(coordinates.port);
+  const match = chassisSpeedSettings.find((setting) => {
+    const leadPort = Number(setting.leadPort);
+    if (String(setting.fpc) !== String(coordinates.fpc) || String(setting.pic) !== String(coordinates.pic) || !Number.isInteger(leadPort)) {
+      return false;
+    }
+    if (String(setting.pic) === "0" && leadPort % 4 === 0 && port >= leadPort && port <= leadPort + 3) {
+      return true;
+    }
+    if (String(setting.pic) === "2" && leadPort === 0 && port >= 0 && port <= 3) {
+      return true;
+    }
+    return port === leadPort;
+  });
+  return speedPrefix(match?.speed);
+}
+
+function syntheticInterfaceConfig(name) {
+  const unit = {
+    unit: "0",
+    portType: "l2",
+    mode: "access",
+    vlanMembers: [],
+    addresses: [],
+    inet6Addresses: [],
+    vlanId: ""
+  };
+  return {
+    name,
+    description: "",
+    unit: "0",
+    portType: "l2",
+    mode: "access",
+    vlanMembers: [],
+    addresses: [],
+    inet6Addresses: [],
+    vlanId: "",
+    nativeVlan: "",
+    mtu: "",
+    aeBundle: "",
+    lacpMode: "",
+    units: [unit],
+    physicalOnly: true
+  };
+}
+
+function backfillPhysicalInterfaceConfigs(interfaceConfigs, ports = [], chassisSpeedSettings = []) {
+  const covered = new Set();
+  Array.from(interfaceConfigs.values()).forEach((item) => {
+    const name = physicalSwitchPortName(item.physicalName || item.name);
+    const coordinates = name ? interfaceCoordinates(name) : null;
+    if (coordinates && item.name === physicalName(item.name)) {
+      covered.add(coordinates.key);
+    }
+  });
+
+  const byCoordinate = new Map();
+  ports.forEach((port) => {
+    const name = physicalSwitchPortName(port.name);
+    const coordinates = name ? interfaceCoordinates(name) : null;
+    if (!coordinates) {
+      return;
+    }
+    const entries = byCoordinate.get(coordinates.key) || [];
+    entries.push(name);
+    byCoordinate.set(coordinates.key, entries);
+  });
+
+  const prefixPreference = ["et", "xe", "ge", "mge"];
+  Array.from(byCoordinate.entries()).forEach(([key, names]) => {
+    if (covered.has(key)) {
+      return;
+    }
+    const coordinates = interfaceCoordinates(names[0]);
+    const chassisPrefix = chassisSpeedPrefixForCoordinates(chassisSpeedSettings, coordinates);
+    const selectedName = chassisPrefix
+      ? `${chassisPrefix}-${coordinates.fpc}/${coordinates.pic}/${coordinates.port}`
+      : prefixPreference.map((prefix) => names.find((name) => name.toLowerCase().startsWith(`${prefix}-`))).find(Boolean) || names[0];
+    interfaceConfigs.set(selectedName, syntheticInterfaceConfig(selectedName));
+    covered.add(key);
+  });
+}
+
+function canonicalConfiguredInterfaces(interfaceConfigs, ports = [], chassisSpeedSettings = []) {
+  const physicalNamesByCoordinate = new Map();
+  ports.forEach((port) => {
+    const name = physicalSwitchPortName(port.name);
+    const coordinates = name ? interfaceCoordinates(name) : null;
+    if (!coordinates) {
+      return;
+    }
+    const entries = physicalNamesByCoordinate.get(coordinates.key) || [];
+    entries.push({ name, synthetic: Boolean(port.synthetic) });
+    physicalNamesByCoordinate.set(coordinates.key, entries);
+  });
+
+  const byCoordinate = new Map();
+  Array.from(interfaceConfigs.values()).forEach((item) => {
+    const name = physicalSwitchPortName(item.physicalName || item.name);
+    const coordinates = name ? interfaceCoordinates(name) : null;
+    if (!coordinates || item.name !== physicalName(item.name)) {
+      return;
+    }
+    const entries = byCoordinate.get(coordinates.key) || [];
+    entries.push(item);
+    byCoordinate.set(coordinates.key, entries);
+  });
+
+  const prefixPreference = ["et", "xe", "ge", "mge"];
+  return Array.from(byCoordinate.entries()).map(([key, items]) => {
+    const coordinates = interfaceCoordinates(items[0].physicalName || items[0].name);
+    const chassisPrefix = chassisSpeedPrefixForCoordinates(chassisSpeedSettings, coordinates);
+    const inventory = physicalNamesByCoordinate.get(key) || [];
+    const realInventoryNames = inventory.filter((item) => !item.synthetic).map((item) => item.name);
+    const allInventoryNames = inventory.map((item) => item.name);
+    const itemNames = items.map((item) => physicalSwitchPortName(item.physicalName || item.name));
+    const selectedName = chassisPrefix
+      ? `${chassisPrefix}-${coordinates.fpc}/${coordinates.pic}/${coordinates.port}`
+      : realInventoryNames.find((name) => itemNames.includes(name))
+        || allInventoryNames.find((name) => itemNames.includes(name))
+        || prefixPreference.map((prefix) => itemNames.find((name) => name.toLowerCase().startsWith(`${prefix}-`))).find(Boolean)
+        || itemNames[0];
+    return items.find((item) => physicalSwitchPortName(item.physicalName || item.name) === selectedName) || items[0];
+  });
 }
 
 function interfaceSortKey(name) {
@@ -519,6 +667,36 @@ function parseAggregateDeviceCount(configXml) {
   return parseTag(chassisBlock, "device-count");
 }
 
+function parseChassisSpeedConfig(configXml) {
+  const chassisBlock = firstConfigBlock(configXml, "chassis");
+  const settings = [];
+
+  collectBlocks(chassisBlock, "fpc").forEach((fpcBlock) => {
+    const fpc = parseTag(fpcBlock, "name");
+    collectBlocks(fpcBlock, "pic").forEach((picBlock) => {
+      const pic = parseTag(picBlock, "name");
+      collectBlocks(picBlock, "port").forEach((portBlock) => {
+        const leadPort = parseTag(portBlock, "name");
+        const speed = parseTag(portBlock, "speed").toLowerCase();
+        if (!fpc || !pic || !leadPort || !speed) {
+          return;
+        }
+        settings.push({
+          fpc,
+          pic,
+          leadPort,
+          speed,
+          profile: "",
+          label: `FPC ${fpc} PIC ${pic} port ${leadPort}`,
+          modified: false
+        });
+      });
+    });
+  });
+
+  return settings;
+}
+
 function hasLeaf(block, tag) {
   const qualifiedTag = `(?:[A-Za-z_][\\w.-]*:)?${tag}`;
   return new RegExp(`<${qualifiedTag}(?:\\s[^>]*)?\\s*/>|<${qualifiedTag}(?:\\s[^>]*)?>`, "i").test(block || "");
@@ -765,11 +943,41 @@ function parseVirtualChassisStatus(text) {
   };
 }
 
+function portPrefixForHardwareDescription(description = "") {
+  if (/25G|40G|100G/i.test(description)) {
+    return "et";
+  }
+  if (/10G/i.test(description) && !/Base-T/i.test(description)) {
+    return "xe";
+  }
+  if (/2\.5G/i.test(description)) {
+    return "mge";
+  }
+  return "ge";
+}
+
+function parsePicPortBlocks(count, description) {
+  const blocks = [];
+  const pattern = /(\d+)x(.+?)(?=-\d+x|$)/gi;
+  let match;
+  while ((match = pattern.exec(`${count}x${description}`))) {
+    const blockCount = Number(match[1]);
+    const blockDescription = match[2].trim();
+    if (Number.isInteger(blockCount) && blockCount > 0 && blockDescription) {
+      blocks.push({ count: blockCount, description: blockDescription });
+    }
+  }
+  return blocks.length ? blocks : [{ count, description }];
+}
+
 function parseChassisHardwarePorts(text, existingPorts = []) {
   const output = outputText(text);
   const existingNames = new Set(existingPorts.map((port) => physicalName(port.name)));
   const ports = [];
+  const pics = [];
   let currentFpc = "0";
+
+  const hasPort = (name) => existingNames.has(name) || ports.some((port) => port.name === name);
 
   output.split(/\r?\n/).forEach((rawLine) => {
     const line = rawLine.trim();
@@ -785,42 +993,44 @@ function parseChassisHardwarePorts(text, existingPorts = []) {
     }
     const pic = picMatch[1];
     const count = Number(picMatch[2]);
-    const description = picMatch[3];
-    let prefix = "ge";
-    if (/25G/i.test(description)) {
-      prefix = "et";
-    } else if (/10G/i.test(description) && !/Base-T/i.test(description)) {
-      prefix = "xe";
-    } else if (/2\.5G/i.test(description)) {
-      prefix = "mge";
+    const description = picMatch[3].trim();
+    if (!Number.isInteger(count) || count <= 0) {
+      return;
     }
 
-    const startPort = pic === "0" && prefix === "ge" && count === 32 ? 16 : 0;
-    for (let index = 0; index < count; index += 1) {
-      const name = `${prefix}-${currentFpc}/${pic}/${startPort + index}`;
-      if (existingNames.has(name)) {
-        continue;
+    pics.push({ fpc: currentFpc, pic, count, description, raw: line });
+
+    let nextPort = 0;
+    parsePicPortBlocks(count, description).forEach((block) => {
+      const prefix = portPrefixForHardwareDescription(block.description);
+      const startPort = nextPort || (pic === "0" && prefix === "ge" && block.count === 32 ? 16 : 0);
+      for (let index = 0; index < block.count; index += 1) {
+        const name = `${prefix}-${currentFpc}/${pic}/${startPort + index}`;
+        if (hasPort(name)) {
+          continue;
+        }
+        ports.push({
+          name,
+          physicalName: name,
+          adminStatus: "unknown",
+          operStatus: "absent",
+          proto: "",
+          local: "",
+          remote: "",
+          description: block.description,
+          speed: block.description,
+          config: null,
+          synthetic: true
+        });
       }
-      ports.push({
-        name,
-        physicalName: name,
-        adminStatus: "unknown",
-        operStatus: "absent",
-        proto: "",
-        local: "",
-        remote: "",
-        description,
-        speed: description,
-        config: null,
-        synthetic: true
-      });
-    }
+      nextPort = startPort + block.count;
+    });
   });
 
   if (/EX4100-48MP/i.test(output)) {
     for (let port = 0; port <= 15; port += 1) {
       const name = `mge-0/0/${port}`;
-      if (!existingNames.has(name) && !ports.some((item) => item.name === name)) {
+      if (!hasPort(name)) {
         ports.push({
           name,
           physicalName: name,
@@ -838,7 +1048,10 @@ function parseChassisHardwarePorts(text, existingPorts = []) {
     }
   }
 
-  return ports.sort(compareInterfaces);
+  return {
+    ports: ports.sort(compareInterfaces),
+    pics
+  };
 }
 
 function parseOpticsDiagnostics(text) {
@@ -950,9 +1163,11 @@ async function getDeviceSnapshot(connection) {
     const spanningTree = parseSpanningTreeConfig(configuration, configVlans);
     const lldp = parseLldpConfig(configuration);
     const virtualChassisConfig = parseVirtualChassisConfig(configuration);
+    const chassisSpeedSettings = parseChassisSpeedConfig(configuration);
     const vlans = parseShowVlans(vlanOutput, configVlans);
     const tersePorts = parseShowInterfacesTerse(interfacesTerse, interfaceConfigs);
-    const chassisPorts = parseChassisHardwarePorts(chassisHardware, tersePorts);
+    const chassisHardwareInfo = parseChassisHardwarePorts(chassisHardware, tersePorts);
+    const chassisPorts = chassisHardwareInfo.ports;
     const optics = parseOpticsDiagnostics(opticsDiagnostics);
     const virtualChassisPorts = parseVirtualChassisPorts(virtualChassisPortsOutput);
     const virtualChassis = parseVirtualChassisStatus(virtualChassisStatusOutput);
@@ -968,14 +1183,17 @@ async function getDeviceSnapshot(connection) {
         };
       })
       .sort(compareInterfaces);
+    backfillPhysicalInterfaceConfigs(interfaceConfigs, ports, chassisSpeedSettings);
 
     return {
       ports,
+      chassisPics: chassisHardwareInfo.pics,
+      chassisSpeedSettings,
       virtualChassisPorts,
       virtualChassis,
       virtualChassisConfig,
       vlans,
-      configuredInterfaces: Array.from(interfaceConfigs.values())
+      configuredInterfaces: canonicalConfiguredInterfaces(interfaceConfigs, ports, chassisSpeedSettings)
         .filter((item) => (item.portType !== "unknown" || item.aeBundle) && item.name === physicalName(item.name) && !/^ae\d+$/i.test(item.name))
         .sort(compareInterfaces),
       aggregateInterfaces: Array.from(interfaceConfigs.values())
@@ -1138,18 +1356,21 @@ function openNetconfSession(connection, onReady) {
 
 async function connectAndInspect(connection) {
   return openNetconfSession(connection, async ({ send, close }) => {
-    const [software, inventory, routingEngine, environment] = await Promise.all([
+    const [software, inventory, versionOutput, routingEngine, environment] = await Promise.all([
       send(rpc("software", "<get-software-information/>")),
       send(rpc("inventory", "<get-chassis-inventory/>")),
+      send(commandRpc("show-version", "show version")).catch(() => ""),
       send(rpc("show-routing-engine", '<get-route-engine-information format="text"/>')),
       send(commandRpc("show-chassis-environment", "show chassis environment")).catch(() => "")
     ]);
     await close();
 
-    const hostname = parseTag(software, "host-name");
+    const versionIdentity = parseShowVersionIdentity(versionOutput);
+    const inventoryModel = parseInventoryModel(inventory);
+    const hostname = parseTag(software, "host-name") || versionIdentity.hostname;
     const osName = parseTag(software, "product-name") || "Junos";
-    const release = parseTag(software, "junos-version") || parseTag(software, "package-information");
-    const model = parseInventoryModel(inventory);
+    const release = parseTag(software, "junos-version") || versionIdentity.release || parseTag(software, "package-information");
+    const model = versionIdentity.model || inventoryModel;
     const serialNumber = parseInventorySerial(inventory);
     const junos = isLikelyJunos(osName, release);
     const supportedModel = isSupportedSwitchModel(model);
@@ -1160,6 +1381,7 @@ async function connectAndInspect(connection) {
       hostname,
       release,
       model,
+      inventoryModel,
       serialNumber,
       routingEngine: parseRoutingEngine(routingEngine),
       environment: parseEnvironment(environment),
@@ -1178,7 +1400,9 @@ async function getMonitoringOutput(connection, view) {
     arp: "show arp",
     dhcpBinding: "show dhcp server binding",
     lacp: "show lacp interfaces",
-    spanningTree: "show spanning-tree bridge"
+    spanningTree: "show spanning-tree bridge",
+    virtualChassis: "show virtual-chassis status",
+    lldpNeighbors: "show lldp neighbors"
   };
   const command = commands[view] || commands.vlan;
   return openNetconfSession(connection, async ({ send, close }) => {

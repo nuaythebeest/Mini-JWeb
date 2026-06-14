@@ -2,21 +2,21 @@
 
 Mini J-Web EX is a local Electron desktop application for configuring Juniper EX switches, with selected QFX compatibility checks, through a simplified J-Web-style GUI.
 
-Current release: `0.6.0-beta.6`
+Current release: `0.6.0-beta.7`
 
 Latest GitHub release:
-[Mini J-Web EX 0.6.0-beta.6](https://github.com/nuaythebeest/Mini-JWeb/releases/tag/v0.6.0-beta.6)
+[Mini J-Web EX 0.6.0-beta.7](https://github.com/nuaythebeest/Mini-JWeb/releases/tag/v0.6.0-beta.7)
 
 The app connects to a switch, pulls a snapshot, keeps candidate edits local in the GUI, and sends changes only when the user runs refresh, operational tools, commit check, commit confirmed, commit, or candidate revert.
 
-The `0.6.0-beta.6` release includes the Mist-inspired QoL redesign plus an IRB hotfix that prevents invalid Junos address delete commands during commit.
+The `0.6.0-beta.7` release adds model-aware Speed Settings, EX4650/QFX5120 Virtual Chassis guardrails, physical-port backfill for unconfigured ports, and monitoring tabs for Virtual Chassis and LLDP neighbors.
 
 ## Downloads
 
 The current release includes:
 
-- Windows x64 installer: `Mini J-Web EX Setup 0.6.0-beta.6-x64.exe`
-- macOS Apple Silicon DMG: `Mini J-Web EX-0.6.0-beta.6-arm64.dmg`
+- Windows x64 installer: `Mini J-Web EX Setup 0.6.0-beta.7-x64.exe`
+- macOS Apple Silicon DMG: `Mini J-Web EX-0.6.0-beta.7-arm64.dmg`
 
 Installers are currently unsigned, so Windows/macOS may warn that the publisher is unknown.
 
@@ -48,6 +48,7 @@ commit confirmed 5
 - Ports menu with search/filter by interface, member/FPC, link state, VLAN, or VCP
 - VLAN creation, editing, deletion, and dependency warnings
 - Interface configuration for access, trunk, Layer 3, voice VLAN, LLDP-MED, edge port, MTU, native VLAN, IPv4, and IPv6
+- Model-aware Speed Settings for EX4650/QFX5120 front-port groups and supported EX4400 extension modules
 - Member/FPC dropdown in the Interfaces menu for Virtual Chassis scale
 - Aggregate Ethernet and LACP configuration
 - Spanning Tree: RSTP, VSTP, bridge priority, BPDU block on edge, and edge-interface reflection
@@ -55,8 +56,8 @@ commit confirmed 5
 - Static routes with `default` or `mgmt_junos` routing-instance dropdown
 - Management tools for OOB management, system settings, reboot, ping, traceroute, user creation, and commit-confirm timer
 - Firmware Upgrade workflow with local file selection, SFTP pre-check, `/var/tmp` file-exists guardrail, overwrite option, storage cleanup, install log, `no-validate` option, reboot prompt, and alternate-slice snapshot
-- Virtual Chassis workflow with current mode display, HGoE guardrails, preprovisioning, member model dropdown, VCP/network conversion actions, and `no-split-detection` option
-- Monitoring tabs for VLAN, route, ARP, DHCP bindings, LACP, and spanning tree
+- Virtual Chassis workflow with current mode display, model-aware member limits, HGoE guardrails for EX models, QFX no-HGoE guardrails, preprovisioning, member model dropdown, VCP/network conversion actions, and `no-split-detection` option
+- Monitoring tabs for VLAN, route, ARP, DHCP bindings, LACP, spanning tree, Virtual Chassis, and LLDP neighbors
 - Commit preview, active configuration view, export set file, commit check, commit confirmed, and commit
 
 ## Supported and Sanity-Checked Platforms
@@ -71,6 +72,7 @@ Sanity-checked so far:
 - EX4300
 - EX4650
 - QFX5110
+- QFX5120-48Y / QFX5120-48YM / QFX5120-32C
 
 Current platform notes:
 

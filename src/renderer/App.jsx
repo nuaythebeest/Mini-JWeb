@@ -102,6 +102,7 @@ const nav = [
   { id: "monitoring", label: "Monitoring", icon: Activity },
   { id: "vlans", label: "VLANs", icon: Layers3 },
   { id: "interfaces", label: "Interfaces", icon: EthernetPort },
+  { id: "speedSettings", label: "Speed Settings", icon: Cable },
   { id: "aggregate", label: "Aggregate Ethernet", icon: AggregateIcon },
   { id: "spanningTree", label: "Spanning Tree", icon: GitBranch },
   { id: "irb", label: "IRB", icon: Network },
@@ -358,14 +359,32 @@ function portTileOrder(a, b) {
   return left - right || a.name.localeCompare(b.name, undefined, { numeric: true });
 }
 
-function groupFrontPanelPorts(frontPanelPorts) {
+function frontPanelPortZone(name, deviceInfo) {
+  const model = String(deviceInfo?.model || "").toLowerCase();
+  const parts = portParts(name);
+  const port = Number(parts.port);
+  if (/^(ex4650|qfx5120-48y|qfx5110-48s)/.test(model) && parts.pic === "0" && port >= 48) {
+    return "uplink";
+  }
+  if (/^qfx5120-32c/.test(model)) {
+    return "uplink";
+  }
+  if (/^ex4400-24x/.test(model) && parts.pic === "0" && port >= 24) {
+    return "uplink";
+  }
+  return parts.pic === "0" ? "access" : "uplink";
+}
+
+function groupFrontPanelPorts(frontPanelPorts, deviceInfo) {
   const groups = new Map();
   frontPanelPorts.forEach(([name, port]) => {
     const parts = portParts(name);
+    const zone = frontPanelPortZone(name, deviceInfo);
     const fpcGroup = groups.get(parts.fpc) || new Map();
-    const items = fpcGroup.get(parts.pic) || [];
-    items.push({ name, port, parts });
-    fpcGroup.set(parts.pic, items);
+    const groupKey = `${parts.pic}:${zone}`;
+    const items = fpcGroup.get(groupKey) || [];
+    items.push({ name, port, parts, zone });
+    fpcGroup.set(groupKey, items);
     groups.set(parts.fpc, fpcGroup);
   });
   return Array.from(groups.entries())
@@ -373,15 +392,24 @@ function groupFrontPanelPorts(frontPanelPorts) {
     .map(([fpc, picMap]) => ({
       fpc,
       pics: Array.from(picMap.entries())
-        .sort(([a], [b]) => Number(a) - Number(b))
-        .map(([pic, items]) => ({
-          pic,
-          rows: [
-            items.sort(portTileOrder).filter((item) => Number(item.parts.port) % 2 === 0),
-            items.sort(portTileOrder).filter((item) => Number(item.parts.port) % 2 !== 0)
-          ].filter((row) => row.length > 0),
-          layout: pic === "0" && items.length > 16 ? "access" : "uplink"
-        }))
+        .sort(([a], [b]) => {
+          const [leftPic, leftZone] = a.split(":");
+          const [rightPic, rightZone] = b.split(":");
+          const zoneOrder = { access: 0, uplink: 1 };
+          return Number(leftPic) - Number(rightPic) || (zoneOrder[leftZone] ?? 9) - (zoneOrder[rightZone] ?? 9);
+        })
+        .map(([groupKey, items]) => {
+          const [pic, zone] = groupKey.split(":");
+          return {
+            key: groupKey,
+            pic,
+            rows: [
+              items.sort(portTileOrder).filter((item) => Number(item.parts.port) % 2 === 0),
+              items.sort(portTileOrder).filter((item) => Number(item.parts.port) % 2 !== 0)
+            ].filter((row) => row.length > 0),
+            layout: zone
+          };
+        })
     }));
 }
 
@@ -395,6 +423,68 @@ function isDisplayableFrontPanelPort(name, deviceInfo) {
     return false;
   }
   return true;
+}
+
+function usesSharedOpticalPortNames(model) {
+  return /^(ex4650|qfx5120-48y|qfx5120-32c|qfx5110-48s|ex4400-48f|ex4400-24x)/.test(String(model || "").toLowerCase());
+}
+
+function physicalPortAliasKey(model, name) {
+  const baseName = physicalInterfaceName(name);
+  const parts = portParts(baseName);
+  if (usesSharedOpticalPortNames(model) && ["ge", "xe", "et"].includes(parts.prefix)) {
+    return `${parts.fpc}/${parts.pic}/${parts.port}`;
+  }
+  return baseName;
+}
+
+function preferredPortPrefixes(model, parts) {
+  const normalized = String(model || "").toLowerCase();
+  const port = Number(parts.port);
+  if (/^qfx5120-32c/.test(normalized)) {
+    return ["et", "xe", "ge"];
+  }
+  if (/^(ex4650|qfx5120-48y)/.test(normalized)) {
+    return ["et", "xe", "ge"];
+  }
+  if (/^qfx5110-48s/.test(normalized)) {
+    return port >= 48 ? ["et", "xe", "ge"] : ["xe", "ge", "et"];
+  }
+  if (/^ex4400-24x/.test(normalized)) {
+    return port >= 24 ? ["et", "xe", "ge"] : ["xe", "ge", "et"];
+  }
+  if (/^ex4400-48f/.test(normalized)) {
+    return port >= 48 ? ["et", "xe", "ge"] : ["xe", "ge", "et"];
+  }
+  return ["et", "xe", "ge"];
+}
+
+function portCandidateScore(model, candidate) {
+  const port = candidate?.port || {};
+  const parts = portParts(candidate?.name || port.name);
+  const prefixes = preferredPortPrefixes(model, parts);
+  const prefixRank = prefixes.includes(parts.prefix) ? prefixes.length - prefixes.indexOf(parts.prefix) : 0;
+  const operRank = port.operStatus === "up" ? 60 : port.operStatus === "down" ? 45 : 0;
+  return operRank
+    + (port.synthetic ? 0 : 30)
+    + (port.config ? 20 : 0)
+    + prefixRank
+    + (candidate?.name === port.name ? 2 : 0);
+}
+
+function preferPhysicalPortCandidate(model, current, candidate) {
+  if (!current) {
+    return candidate;
+  }
+  const currentScore = portCandidateScore(model, current);
+  const candidateScore = portCandidateScore(model, candidate);
+  if (candidateScore > currentScore) {
+    return candidate;
+  }
+  if (candidateScore === currentScore && compareInterfaceNames(candidate.name, current.name) < 0) {
+    return candidate;
+  }
+  return current;
 }
 
 const VC_PREPROVISION_MODELS = [
@@ -412,8 +502,15 @@ const VC_PREPROVISION_MODELS = [
   "EX4400-48F",
   "EX4650-48Y",
   "QFX5110",
-  "QFX5120"
+  "QFX5120-32C",
+  "QFX5120-48T",
+  "QFX5120-48Y",
+  "QFX5120-48YM"
 ];
+
+function isQfxModel(model = "") {
+  return /^qfx/i.test(String(model || "").trim());
+}
 
 function virtualChassisModeLabel(snapshot) {
   const mode = String(snapshot?.virtualChassis?.mode || "").toLowerCase();
@@ -429,33 +526,198 @@ function virtualChassisModeLabel(snapshot) {
   return snapshot?.virtualChassis?.raw ? "Unknown from switch output" : "Not detected";
 }
 
-function portSpeedOptionsForInterface(model = "", interfaceName = "") {
-  const normalized = String(model || "").toLowerCase();
-  const parts = portParts(interfaceName);
+function isQfx5120_48YFamily(model = "") {
+  return /^qfx5120-48ym?(?:-|$)/.test(String(model || "").toLowerCase());
+}
+
+function findChassisPic(deviceSnapshot, fpc, pic) {
+  return (deviceSnapshot?.chassisPics || []).find((item) => String(item.fpc) === String(fpc) && String(item.pic) === String(pic)) || null;
+}
+
+function normalizedSpeed(value = "") {
+  return String(value || "").trim().toLowerCase();
+}
+
+function speedPrefix(speed = "") {
+  return { "1g": "ge", "10g": "xe", "25g": "et" }[normalizedSpeed(speed)] || "";
+}
+
+function speedFromPrefix(prefix = "") {
+  return { ge: "1g", xe: "10g", et: "25g" }[String(prefix || "").toLowerCase()] || "";
+}
+
+function replaceInterfacePrefix(name, prefix) {
+  return String(name || "").replace(/^(ge|xe|et)-/i, `${prefix}-`);
+}
+
+function speedSettingKey(item = {}) {
+  return `${item.profile || ""}:${item.fpc}:${item.pic}:${item.leadPort}`;
+}
+
+function compactSpeedSettings(settings = []) {
+  const byKey = new Map();
+  settings.forEach((item) => {
+    if (!item) {
+      return;
+    }
+    byKey.set(speedSettingKey(item), item);
+  });
+  return Array.from(byKey.values());
+}
+
+function ex4400Em4sAutoDetects(release = "") {
+  const parsed = parseJunosRelease(release);
+  if (!parsed) {
+    return null;
+  }
+  if (parsed.major > 25) return true;
+  if (parsed.major === 25) return parsed.minor > 1 || (parsed.minor === 1 && parsed.revision >= 1);
+  if (parsed.major === 24) {
+    if (parsed.minor > 4) return true;
+    if (parsed.minor === 4) return parsed.revision >= 2;
+    if (parsed.minor === 2) return parsed.revision >= 2;
+  }
+  return false;
+}
+
+function classifyEx4400Pic2(pic = {}, release = "") {
+  const description = String(pic?.description || "");
+  if (/4x25|25G|SFP28|EM-4Y/i.test(description)) {
+    return {
+      profile: "ex4400-em-4y",
+      enabled: true,
+      speeds: ["1g", "10g", "25g"],
+      defaultSpeed: "25g",
+      message: "EX4400-EM-4Y uses one speed mode for all four PIC 2 ports."
+    };
+  }
+  if (/4x10|10G\s*SFP|SFP\+|EM-4S/i.test(description)) {
+    const autoDetect = ex4400Em4sAutoDetects(release);
+    if (autoDetect === true) {
+      return {
+        profile: "ex4400-em-4s",
+        enabled: false,
+        speeds: [],
+        defaultSpeed: "10g",
+        message: `EX4400-EM-4S is auto-detect on Junos ${release || "this release"}; no speed setting is needed.`
+      };
+    }
+    if (autoDetect === null) {
+      return {
+        profile: "ex4400-em-4s",
+        enabled: false,
+        speeds: [],
+        defaultSpeed: "10g",
+        message: "Junos release is unknown, so EX4400-EM-4S manual speed controls are disabled."
+      };
+    }
+    return {
+      profile: "ex4400-em-4s",
+      enabled: true,
+      speeds: ["1g", "10g"],
+      defaultSpeed: "10g",
+      message: "EX4400-EM-4S uses one speed mode for all four PIC 2 ports on this Junos release."
+    };
+  }
+  return {
+    profile: "auto-detect",
+    enabled: false,
+    speeds: [],
+    defaultSpeed: "",
+    message: `PIC 2 ${description || "module"} is treated as optic auto-detect or unsupported for chassis speed mode.`
+  };
+}
+
+function speedTargets(deviceInfo = {}, deviceSnapshot = {}) {
+  const model = String(deviceInfo?.model || "").toLowerCase();
+  if (/^ex4650/.test(model) || isQfx5120_48YFamily(model)) {
+    const fpcs = Array.from(new Set([
+      ...(deviceSnapshot?.chassisPics || []).filter((pic) => String(pic.pic) === "0").map((pic) => String(pic.fpc)),
+      ...(deviceSnapshot?.ports || []).map((port) => portParts(port.name).fpc).filter(Boolean)
+    ])).sort((a, b) => Number(a) - Number(b));
+    const members = fpcs.length ? fpcs : ["0"];
+    return members.flatMap((fpc) => Array.from({ length: 12 }, (_unused, index) => {
+      const leadPort = index * 4;
+      return {
+        key: `front-group4:${fpc}:0:${leadPort}`,
+        profile: "front-group4",
+        fpc,
+        pic: "0",
+        leadPort,
+        ports: Array.from({ length: 4 }, (_item, offset) => leadPort + offset),
+        enabled: true,
+        speeds: ["1g", "10g", "25g"],
+        defaultSpeed: "10g",
+        title: `FPC ${fpc} ports ${leadPort}-${leadPort + 3}`,
+        label: `FPC ${fpc} PIC 0 ports ${leadPort}-${leadPort + 3}`,
+        note: "One chassis speed command on the lead port controls this four-port group."
+      };
+    }));
+  }
+
+  if (/^ex4400/.test(model)) {
+    const pics = (deviceSnapshot?.chassisPics || []).filter((pic) => String(pic.pic) === "2");
+    if (!pics.length) {
+      return [];
+    }
+    return pics.map((pic) => {
+      const profile = classifyEx4400Pic2(pic, deviceInfo?.release || "");
+      return {
+        key: `${profile.profile}:${pic.fpc}:2:0`,
+        profile: profile.profile,
+        fpc: String(pic.fpc),
+        pic: "2",
+        leadPort: 0,
+        ports: [0, 1, 2, 3],
+        enabled: profile.enabled,
+        speeds: profile.speeds,
+        defaultSpeed: profile.defaultSpeed,
+        title: `FPC ${pic.fpc} PIC 2`,
+        label: `FPC ${pic.fpc} PIC 2 ports 0-3`,
+        note: profile.message
+      };
+    });
+  }
+
+  return [];
+}
+
+function targetForPort(deviceInfo = {}, deviceSnapshot = {}, parts = {}) {
   const port = Number(parts.port);
-  if ((/^ex4650/.test(normalized) || /^qfx5120-48y/.test(normalized)) && parts.pic === "0") {
-    if (port >= 0 && port <= 47) {
-      return {
-        profile: "group4-front-sfp28",
-        options: ["", "1g", "10g", "25g"],
-        note: `Ports ${Math.floor(port / 4) * 4}-${Math.floor(port / 4) * 4 + 3} share one speed group.`
-      };
+  return speedTargets(deviceInfo, deviceSnapshot).find((target) => {
+    if (String(target.fpc) !== String(parts.fpc) || String(target.pic) !== String(parts.pic)) {
+      return false;
     }
-    if (port >= 48) {
-      return {
-        profile: "uplink-qsfp28",
-        options: ["", "40g", "100g"],
-        note: "QSFP uplinks support 40G or 100G. Verify channelized subports before changing speed."
-      };
-    }
+    return target.profile === "front-group4"
+      ? port >= Number(target.leadPort) && port <= Number(target.leadPort) + 3
+      : target.ports.includes(port);
+  }) || null;
+}
+
+function speedSettingMatchesTarget(item = {}, target = {}) {
+  return String(item.fpc) === String(target.fpc)
+    && String(item.pic) === String(target.pic)
+    && String(item.leadPort) === String(target.leadPort);
+}
+
+function speedForTarget(config = {}, target = {}) {
+  const settings = compactSpeedSettings(config.speedSettings || []);
+  return normalizedSpeed(settings.find((item) => speedSettingMatchesTarget(item, target))?.speed) || target.defaultSpeed || "";
+}
+
+function effectiveSpeedForPort(deviceInfo = {}, deviceSnapshot = {}, config = {}, name = "") {
+  const parts = portParts(name);
+  const target = targetForPort(deviceInfo, deviceSnapshot, parts);
+  if (target) {
+    return speedForTarget(config, target) || speedFromPrefix(parts.prefix) || target.defaultSpeed || "";
   }
-  if (/^ex4400-48f/.test(normalized) && parts.pic === "0") {
-    return { profile: "sfp-1g-10g", options: ["", "1g", "10g"], note: "EX4400-48F SFP/SFP+ ports support 1G or 10G depending on optics." };
-  }
-  if (/^ex4400-24x/.test(normalized) && parts.pic === "0") {
-    return { profile: "sfpplus-1g-10g", options: ["", "1g", "10g"], note: "EX4400-24X front SFP+ ports support 1G or 10G optics." };
-  }
-  return null;
+  return speedFromPrefix(parts.prefix);
+}
+
+function effectiveInterfaceNameForDisplay(name, deviceInfo, deviceSnapshot, config) {
+  const speed = effectiveSpeedForPort(deviceInfo, deviceSnapshot, config, name);
+  const prefix = speedPrefix(speed);
+  return prefix ? replaceInterfacePrefix(physicalInterfaceName(name), prefix) : physicalInterfaceName(name);
 }
 
 function eligibleVcPortsForModel(deviceInfo, deviceSnapshot) {
@@ -475,9 +737,50 @@ function eligibleVcPortsForModel(deviceInfo, deviceSnapshot) {
     });
   const unique = Array.from(new Map(ports.map((port) => [port.key, port])).values())
     .sort((a, b) => Number(a.fpc) - Number(b.fpc) || Number(a.picSlot) - Number(b.picSlot) || Number(a.port) - Number(b.port));
+  const fpcs = Array.from(new Set([
+    ...unique.map((port) => port.fpc).filter(Boolean),
+    ...(deviceSnapshot?.virtualChassis?.members || []).map((member) => member.memberId).filter(Boolean)
+  ])).sort((a, b) => Number(a) - Number(b));
+  const members = fpcs.length ? fpcs : ["0"];
+  const makePort = (fpc, picSlot, port, prefix = "et") => {
+    const key = `${fpc}/${picSlot}/${port}`;
+    const existing = unique.find((item) => item.key === key);
+    if (existing) {
+      return existing;
+    }
+    return {
+      key,
+      name: `${prefix}-${fpc}/${picSlot}/${port}`,
+      fpc: String(fpc),
+      picSlot: String(picSlot),
+      port: String(port),
+      prefix
+    };
+  };
+  const fixedRange = (picSlot, start, end, prefix = "et") => members.flatMap((fpc) => (
+    Array.from({ length: end - start + 1 }, (_item, offset) => makePort(fpc, picSlot, start + offset, prefix))
+  ));
 
   if (/^ex2300/.test(model)) {
-    return unique.filter((port) => port.picSlot === "1" && ["0", "1"].includes(port.port));
+    return fixedRange("1", 0, 1, "xe");
+  }
+  if (/^ex4000-8p/.test(model)) {
+    return fixedRange("1", 2, 3, "xe");
+  }
+  if (/^ex4000/.test(model)) {
+    return fixedRange("1", 0, 1, "xe");
+  }
+  if (/^ex4650/.test(model) || /^qfx5120-48ym?(?:-|$)/.test(model)) {
+    return fixedRange("0", 48, 55, "et");
+  }
+  if (/^qfx5120-48t/.test(model)) {
+    return fixedRange("0", 48, 53, "et");
+  }
+  if (/^qfx5120-32c/.test(model)) {
+    return fixedRange("0", 0, 31, "et");
+  }
+  if (/^qfx5110/.test(model)) {
+    return unique.filter((port) => ["xe", "et"].includes(port.prefix));
   }
   if (/^ex4100|^ex4400/.test(model)) {
     const uplinks = unique.filter((port) => port.picSlot !== "0");
@@ -585,6 +888,14 @@ function compareJunosRelease(left, right) {
 
 function hgoeRequirementForModel(model = "") {
   const normalized = String(model || "").toLowerCase();
+  if (isQfxModel(normalized)) {
+    return {
+      supported: false,
+      minimum: "",
+      defaultMode: "HiGig",
+      note: "QFX models are treated as non-HGoE platforms in Mini J-Web EX guardrails."
+    };
+  }
   if (/^ex4100-h/.test(normalized)) {
     return {
       supported: true,
@@ -604,7 +915,7 @@ function hgoeRequirementForModel(model = "") {
   if (/^ex4400-24x/.test(normalized)) {
     return {
       supported: true,
-      minimum: "22.3R1",
+      minimum: "23.1R1",
       defaultMode: "HGoE",
       note: "EX4400-24X uses HGoE as the default Virtual Chassis mode."
     };
@@ -612,20 +923,12 @@ function hgoeRequirementForModel(model = "") {
   if (/^ex4400/.test(normalized)) {
     return {
       supported: true,
-      minimum: "22.3R1",
-      defaultMode: "HiGig",
-      note: "EX4400 supports HGoE from Junos OS 22.3R1 when the installed hardware provides HGoE-capable VC/uplink ports; verify the module before changing mode."
-    };
-  }
-  if (/^qfx5120-48ym/.test(normalized)) {
-    return {
-      supported: true,
       minimum: "23.1R1",
-      defaultMode: "HGoE",
-      note: "QFX5120-48YM uses HGoE for Virtual Chassis workflows; verify QFX-specific limitations before deployment."
+      defaultMode: "HiGig",
+      note: "EX4400 supports HGoE from Junos OS 23.1R1 when the installed hardware provides HGoE-capable VC/uplink ports; verify the module before changing mode."
     };
   }
-  if (/^ex4000|^ex4650|^qfx5110|^qfx5120-48y/.test(normalized)) {
+  if (/^ex4000|^ex4650/.test(normalized)) {
     return {
       supported: false,
       minimum: "",
@@ -652,6 +955,70 @@ function hgoeEligibility(deviceInfo) {
     releaseKnown: Boolean(parseJunosRelease(release)),
     releaseMeetsMinimum,
     eligible: Boolean(requirement.supported && releaseMeetsMinimum)
+  };
+}
+
+function virtualChassisCapability(deviceInfo = {}) {
+  const model = String(deviceInfo?.model || "").toLowerCase();
+  const release = deviceInfo?.release || "";
+  const releaseKnown = Boolean(parseJunosRelease(release));
+  const atLeast = (minimum) => {
+    const comparison = compareJunosRelease(release, minimum);
+    return comparison !== null && comparison >= 0;
+  };
+  const capability = {
+    maxMembers: 10,
+    maxMembersLabel: "10",
+    warning: "",
+    note: "Model supports standard Virtual Chassis member limits.",
+    minReleaseForFullScale: ""
+  };
+
+  if (/^ex2300/.test(model)) {
+    return { ...capability, maxMembers: 4, maxMembersLabel: "4", note: "EX2300 Virtual Chassis supports up to 4 members." };
+  }
+  if (/^ex4000/.test(model)) {
+    return { ...capability, maxMembers: 6, maxMembersLabel: "6", note: "EX4000 Virtual Chassis supports up to 6 members." };
+  }
+  if (/^ex4650/.test(model)) {
+    if (atLeast("20.1R1")) {
+      return { ...capability, maxMembers: 4, maxMembersLabel: "4", minReleaseForFullScale: "20.1R1", note: "EX4650-48Y supports up to 4 members on Junos OS 20.1R1 or later." };
+    }
+    return {
+      ...capability,
+      maxMembers: 2,
+      maxMembersLabel: releaseKnown ? "2" : "2 safe default",
+      minReleaseForFullScale: "20.1R1",
+      warning: releaseKnown ? "Upgrade to Junos OS 20.1R1 or later before planning more than 2 EX4650 members." : "Release is unknown, so Mini J-Web EX caps EX4650 planning to the safe 2-member limit.",
+      note: "EX4650-48Y supports 2 members from Junos OS 19.3R1; 4 members require 20.1R1 or later."
+    };
+  }
+  if (/^qfx5120-48ym/.test(model)) {
+    if (atLeast("23.1R1")) {
+      return { ...capability, maxMembers: 4, maxMembersLabel: "4", minReleaseForFullScale: "23.1R1", note: "QFX5120-48YM supports up to 4 members on Junos OS 23.1R1 or later. HGoE controls remain hidden for QFX." };
+    }
+    return {
+      ...capability,
+      maxMembers: 2,
+      maxMembersLabel: releaseKnown ? "2" : "2 safe default",
+      minReleaseForFullScale: "23.1R1",
+      warning: releaseKnown ? "Upgrade to Junos OS 23.1R1 or later before planning more than 2 QFX5120-48YM members." : "Release is unknown, so Mini J-Web EX caps QFX5120-48YM planning to the safe 2-member limit.",
+      note: "QFX5120-48YM four-member support is release gated at Junos OS 23.1R1."
+    };
+  }
+  if (/^qfx5120-(48y|48t|32c)/.test(model)) {
+    return { ...capability, maxMembers: 2, maxMembersLabel: "2", note: "QFX5120 Virtual Chassis is capped at 2 members for this model." };
+  }
+  if (/^qfx5110/.test(model)) {
+    return { ...capability, maxMembers: 10, maxMembersLabel: "10", note: "QFX5110 Virtual Chassis supports up to 10 members." };
+  }
+  if (/^ex3400|^ex4100|^ex4300|^ex4400|^ex4600/.test(model)) {
+    return { ...capability, maxMembers: 10, maxMembersLabel: "10", note: "This EX family supports up to 10 Virtual Chassis members." };
+  }
+  return {
+    ...capability,
+    maxMembersLabel: "10 default",
+    warning: "Model-specific VC limits are unknown. Mini J-Web EX uses the generic 10-member validation ceiling."
   };
 }
 
@@ -741,8 +1108,6 @@ function newInterface(vlanName = "") {
     ipv4Mode: "static",
     ipAddresses: "",
     ipv6Addresses: "",
-    portSpeed: "",
-    speedProfile: "",
     stpEdge: false,
     bundleAe: "",
     modified: true,
@@ -1010,11 +1375,12 @@ function DeviceAccess({ connectionProps }) {
 
 function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnapshot }) {
   const hgoe = hgoeEligibility(deviceInfo);
+  const vcCapability = virtualChassisCapability(deviceInfo);
   const virtualChassis = config.virtualChassis || defaultConfig.virtualChassis;
   const connected = Boolean(deviceInfo?.ok);
-  const statusClass = hgoe.eligible ? "ok" : hgoe.supported ? "warn" : "alert";
+  const statusClass = vcCapability.warning ? "warn" : "ok";
   const versionText = connected ? hgoe.release || "Unknown" : "Connect to a switch";
-  const requirementText = hgoe.minimum ? `Junos OS ${hgoe.minimum} or later` : hgoe.supported ? "Model default support" : "Unsupported or unknown";
+  const hgoeText = hgoe.supported ? (hgoe.minimum ? `Junos OS ${hgoe.minimum}+` : "Supported") : "Not supported";
   const eligiblePorts = useMemo(() => eligibleVcPortsForModel(deviceInfo, deviceSnapshot), [deviceInfo, deviceSnapshot]);
   const [selectedPortKey, setSelectedPortKey] = useState("");
   const selectedPort = eligiblePorts.find((port) => port.key === selectedPortKey) || eligiblePorts[0] || null;
@@ -1025,6 +1391,11 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
   const canRunAnyVcAction = connected && selectedPort && !busy;
   const canRunPerPortVcAction = connected && hgoe.eligible && !busy;
   const liveMemberCount = deviceSnapshot?.virtualChassis?.members?.length || 0;
+  const plannedMemberCount = (virtualChassis.members || []).length;
+  const intendedMemberCount = virtualChassis.preprovisioned && plannedMemberCount ? plannedMemberCount : liveMemberCount;
+  const addMemberDisabled = plannedMemberCount >= vcCapability.maxMembers;
+  const overMemberLimit = plannedMemberCount > vcCapability.maxMembers || liveMemberCount > vcCapability.maxMembers;
+  const splitDetectionWarning = intendedMemberCount >= 3 && virtualChassis.noSplitDetection;
 
   async function runVcAction({ action, confirmText, pendingText }) {
     const confirmed = window.confirm(confirmText);
@@ -1062,6 +1433,10 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
   }
 
   function addVcMember() {
+    if (addMemberDisabled) {
+      setStatus(`Maximum ${vcCapability.maxMembersLabel} Virtual Chassis member rows reached for ${deviceInfo?.model || "this model"}.`);
+      return;
+    }
     const usedIds = new Set((virtualChassis.members || []).map((member) => String(member.memberId)));
     let nextId = 0;
     while (usedIds.has(String(nextId))) {
@@ -1082,7 +1457,7 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
   }
 
   function importCurrentMembers() {
-    const imported = (deviceSnapshot?.virtualChassis?.members || []).map((member) => ({
+    let imported = (deviceSnapshot?.virtualChassis?.members || []).map((member) => ({
       memberId: member.memberId,
       serialNumber: member.serialNumber,
       model: member.model,
@@ -1098,12 +1473,16 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
         modified: true
       });
     }
+    if (imported.length > vcCapability.maxMembers) {
+      setStatus(`Imported current members but capped editable rows at ${vcCapability.maxMembersLabel} for ${deviceInfo?.model || "this model"}.`);
+      imported = imported.slice(0, vcCapability.maxMembers);
+    }
     setVirtualChassis({ preprovisioned: true, members: imported });
   }
 
   return (
     <div className="vc-layout">
-      <Section title="HGoE Requirement" icon={Network}>
+      <Section title="Virtual Chassis Capability" icon={Network}>
         <div className="vc-status-grid">
           <div className="vc-status-card">
             <span>Detected model</span>
@@ -1114,20 +1493,29 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
             <strong>{versionText}</strong>
           </div>
           <div className="vc-status-card">
-            <span>Minimum for HGoE</span>
-            <strong>{requirementText}</strong>
+            <span>Member limit</span>
+            <strong>{vcCapability.maxMembersLabel}</strong>
           </div>
           <div className={`vc-status-card ${statusClass}`}>
-            <span>HGoE readiness</span>
-            <strong>{hgoe.eligible ? "Ready" : hgoe.supported ? "Upgrade required" : "Not supported"}</strong>
+            <span>VC guardrail</span>
+            <strong>{vcCapability.warning ? "Attention" : "Ready"}</strong>
           </div>
           <div className="vc-status-card">
             <span>Current VC mode</span>
             <strong>{virtualChassisModeLabel(deviceSnapshot)}</strong>
           </div>
+          <div className="vc-status-card">
+            <span>HGoE</span>
+            <strong>{hgoeText}</strong>
+          </div>
+        </div>
+        <div className={vcCapability.warning || overMemberLimit ? "warning-panel" : "guidance-panel success"}>
+          <strong>{overMemberLimit ? "Member count exceeds guardrail" : vcCapability.warning ? "Release-gated VC limit" : "Model-aware VC limit"}</strong>
+          <p>{overMemberLimit ? `This snapshot or candidate has more than ${vcCapability.maxMembersLabel} member rows for ${deviceInfo?.model || "this model"}.` : vcCapability.warning || vcCapability.note}</p>
+          {vcCapability.minReleaseForFullScale ? <p>Full-scale support requires Junos OS {vcCapability.minReleaseForFullScale} or later.</p> : null}
         </div>
         <div className={hgoe.eligible ? "guidance-panel success" : "warning-panel"}>
-          <strong>{hgoe.eligible ? "HGoE can be offered for this platform" : "HGoE guardrail"}</strong>
+          <strong>{hgoe.eligible ? "HGoE can be offered for this EX platform" : "HGoE guardrail"}</strong>
           <p>{hgoe.note}</p>
           {connected && hgoe.supported && !hgoe.releaseMeetsMinimum ? (
             <p>Current release {hgoe.release || "unknown"} is below the minimum. Show a warning and disable HGoE mode-change actions until the switch is upgraded.</p>
@@ -1161,13 +1549,15 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
           <button type="button" onClick={importCurrentMembers}>
             <RefreshCw size={16} />Import current members
           </button>
-          <button type="button" onClick={addVcMember}>
+          <button type="button" onClick={addVcMember} disabled={addMemberDisabled} title={addMemberDisabled ? `Maximum ${vcCapability.maxMembersLabel} members for this model` : "Add Virtual Chassis member"}>
             <Plus size={16} />Add member
           </button>
         </div>
-        <div className={liveMemberCount === 2 ? "guidance-panel success" : "guidance-panel"}>
+        <div className={splitDetectionWarning ? "warning-panel" : intendedMemberCount === 2 ? "guidance-panel success" : "guidance-panel"}>
           <strong>Split detection</strong>
-          <p>For a 2-member Virtual Chassis, Juniper recommends disabling split detection with <code>set virtual-chassis no-split-detection</code>. For 3 or more members, keep split detection enabled unless your design requires otherwise.</p>
+          <p>{splitDetectionWarning
+            ? "This candidate has 3 or more members while no-split-detection is enabled. Remove no-split-detection before expanding beyond 2 members unless your design explicitly requires otherwise."
+            : "For a 2-member Virtual Chassis, Juniper recommends disabling split detection with set virtual-chassis no-split-detection. For 3 or more members, keep split detection enabled unless your design requires otherwise."}</p>
         </div>
         <div className="table-wrap vc-member-table">
           <table>
@@ -1225,35 +1615,37 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
           <p>Before any future VC Port to Network Port action, Mini J-Web EX should warn that all default VCP ports may become network ports and the switch may no longer have usable VCP links until changed back.</p>
         </div>
         <div className="vc-action-grid">
-          <div className="vc-action-card">
-            <span>VC Transport Mode</span>
-            <strong>HGoE mode toggle</strong>
-            <p>Changing between HiGig and HGoE requires a reboot. Use HGoE when you need flexible combinations of 25G network ports and 25G VCP ports.</p>
-            <div className="section-actions">
-              <button
-                className="primary"
-                disabled={!canRunHgoeMode}
-                onClick={() => runVcAction({
-                  action: { type: "virtualChassisMode", mode: "hgoe" },
-                  confirmText: "Enable HGoE mode and reboot the switch?\n\nCommand:\nrequest virtual-chassis mode hgoe reboot",
-                  pendingText: "Enabling HGoE mode..."
-                })}
-              >
-                <Network size={16} />Enable HGoE
-              </button>
-              <button
-                disabled={!canRunHigigMode}
-                onClick={() => runVcAction({
-                  action: { type: "virtualChassisMode", mode: "higig" },
-                  confirmText: "Revert to HiGig mode and reboot the switch?\n\nCommand:\nrequest virtual-chassis mode hgoe disable reboot",
-                  pendingText: "Reverting to HiGig mode..."
-                })}
-              >
-                <RotateCcw size={16} />Revert to HiGig
-              </button>
+          {hgoe.supported ? (
+            <div className="vc-action-card">
+              <span>VC Transport Mode</span>
+              <strong>HGoE mode toggle</strong>
+              <p>Changing between HiGig and HGoE requires a reboot. Use HGoE only on EX platforms and releases that support it.</p>
+              <div className="section-actions">
+                <button
+                  className="primary"
+                  disabled={!canRunHgoeMode}
+                  onClick={() => runVcAction({
+                    action: { type: "virtualChassisMode", mode: "hgoe" },
+                    confirmText: "Enable HGoE mode and reboot the switch?\n\nCommand:\nrequest virtual-chassis mode hgoe reboot",
+                    pendingText: "Enabling HGoE mode..."
+                  })}
+                >
+                  <Network size={16} />Enable HGoE
+                </button>
+                <button
+                  disabled={!canRunHigigMode}
+                  onClick={() => runVcAction({
+                    action: { type: "virtualChassisMode", mode: "higig" },
+                    confirmText: "Revert to HiGig mode and reboot the switch?\n\nCommand:\nrequest virtual-chassis mode hgoe disable reboot",
+                    pendingText: "Reverting to HiGig mode..."
+                  })}
+                >
+                  <RotateCcw size={16} />Revert to HiGig
+                </button>
+              </div>
+              {!hgoe.eligible ? <small>{hgoe.note}</small> : null}
             </div>
-            {!hgoe.eligible ? <small>{hgoe.note}</small> : null}
-          </div>
+          ) : null}
 
           <div className="vc-action-card">
             <span>HiGig / Non-HGoE</span>
@@ -1286,7 +1678,7 @@ function VirtualChassis({ config, setConfig, deviceInfo, connection, deviceSnaps
           <div className="vc-action-card">
             <span>Eligible port conversion</span>
             <strong>Selected PIC and port</strong>
-            <p>Only ports detected as valid VCP-capable uplinks for this model are shown. EX2300-C models show PIC 1 port 0 and 1 only.</p>
+            <p>Only ports mapped as valid VCP-capable uplinks for this model are shown. Unsupported ports are hidden even when Junos would accept the command syntax.</p>
             <div className="vc-port-picker">
               <label>
                 Eligible port
@@ -1373,14 +1765,35 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
     return haystack.includes(query);
   };
   const filteredNames = names.filter(matchesPortFilter);
-  const frontPanelPorts = Array.from(
-    new Map(filteredNames.map((name) => {
-      const port = snapshotByName.get(name);
-      return [physicalInterfaceName(name), port];
-    })).entries()
-  ).filter(([name]) => /^(ge|mge|xe|et)-/i.test(name) && isDisplayableFrontPanelPort(name, deviceInfo));
-  const frontPanelGroups = groupFrontPanelPorts(frontPanelPorts);
-  const tableNames = filteredNames.filter((name) => !/^vcp-/i.test(physicalInterfaceName(name)));
+  const frontPanelPorts = Array.from(filteredNames.reduce((grouped, name) => {
+    const baseName = physicalInterfaceName(name);
+    if (!/^(ge|mge|xe|et)-/i.test(baseName) || !isDisplayableFrontPanelPort(baseName, deviceInfo)) {
+      return grouped;
+    }
+    const key = physicalPortAliasKey(deviceInfo?.model, baseName);
+    const candidate = { name: baseName, port: snapshotByName.get(baseName) || snapshotByName.get(name) };
+    grouped.set(key, preferPhysicalPortCandidate(deviceInfo?.model, grouped.get(key), candidate));
+    return grouped;
+  }, new Map()).values())
+    .map(({ name, port }) => [name, port])
+    .sort(([a], [b]) => compareInterfaceNames(a, b));
+  const frontPanelGroups = groupFrontPanelPorts(frontPanelPorts, deviceInfo);
+  const tableNames = Array.from(filteredNames.reduce((grouped, name) => {
+    const baseName = physicalInterfaceName(name);
+    if (/^vcp-/i.test(baseName)) {
+      return grouped;
+    }
+    if (/^(ge|xe|et)-/i.test(baseName) && name === baseName) {
+      const key = physicalPortAliasKey(deviceInfo?.model, baseName);
+      const candidate = { name, port: snapshotByName.get(name) };
+      grouped.set(key, preferPhysicalPortCandidate(deviceInfo?.model, grouped.get(key), candidate));
+      return grouped;
+    }
+    grouped.set(name, { name, port: snapshotByName.get(name) });
+    return grouped;
+  }, new Map()).values())
+    .map(({ name }) => name)
+    .sort(compareInterfaceNames);
 
   async function refresh() {
     setBusy(true);
@@ -1426,7 +1839,7 @@ function Ports({ config, setConfig, deviceInfo, deviceSnapshot, connection, setD
               <div className="fpc-label">FPC {group.fpc}</div>
               <div className="pic-stack">
                 {group.pics.map((picGroup) => (
-                  <div key={`${group.fpc}-${picGroup.pic}`} className="pic-row">
+                  <div key={`${group.fpc}-${picGroup.key}`} className="pic-row">
                     <div className="pic-label">PIC {picGroup.pic}</div>
                     <div className={`front-panel ${picGroup.layout === "access" ? "access-panel" : "uplink-panel"}`}>
                       {picGroup.rows.map((row, rowIndex) => (
@@ -1592,16 +2005,19 @@ function Interfaces({ config, setConfig, deviceSnapshot, deviceInfo }) {
       if (!supportedPort.test(baseName) || /^vcp-/i.test(baseName)) {
         return;
       }
-      const current = grouped.get(baseName);
-      if (!current || port.name === baseName) {
-        grouped.set(baseName, port);
-      }
+      const displayName = effectiveInterfaceNameForDisplay(baseName, deviceInfo, deviceSnapshot, config);
+      const key = physicalPortAliasKey(deviceInfo?.model, displayName);
+      const candidate = { name: displayName, port };
+      grouped.set(key, preferPhysicalPortCandidate(deviceInfo?.model, grouped.get(key), candidate));
     });
-    return grouped;
-  }, [deviceSnapshot]);
+    return new Map(Array.from(grouped.values()).map(({ name, port }) => [name, port]));
+  }, [config, deviceInfo, deviceSnapshot]);
   const interfaceByName = useMemo(
-    () => new Map(config.interfaces.map((item, index) => [physicalInterfaceName(item.name), { item, index }])),
-    [config.interfaces]
+    () => new Map(config.interfaces.map((item, index) => [
+      effectiveInterfaceNameForDisplay(item.name, deviceInfo, deviceSnapshot, config),
+      { item, index }
+    ])),
+    [config, deviceInfo, deviceSnapshot]
   );
   const portNames = useMemo(
     () => Array.from(new Set([...portByName.keys(), ...interfaceByName.keys()]))
@@ -1622,7 +2038,6 @@ function Interfaces({ config, setConfig, deviceSnapshot, deviceInfo }) {
   const activeIndex = activeEntry?.index ?? -1;
   const activePort = portByName.get(activeName);
   const activeConfig = activeEntry?.item || { ...newInterface(defaultAccessVlan(config)), name: activeName, modified: false };
-  const activeSpeedProfile = portSpeedOptionsForInterface(deviceInfo?.model, activeName);
 
   const updateActive = (patch) => {
     if (!activeName) {
@@ -1736,23 +2151,6 @@ function Interfaces({ config, setConfig, deviceSnapshot, deviceInfo }) {
                 <span>{activeIndex >= 0 ? "Candidate loaded" : "No local candidate yet"}</span>
               </div>
 
-              {activeSpeedProfile ? (
-                <div className="guidance-panel interface-speed-panel">
-                  <strong>Port Speed</strong>
-                  <p>{activeSpeedProfile.note} Changing speed may flap the port and should be applied with Commit Confirm.</p>
-                  <Field label="Configured speed">
-                    <select
-                      value={activeConfig.portSpeed || ""}
-                      onChange={(event) => updateActive({ portSpeed: event.target.value, speedProfile: activeSpeedProfile.profile })}
-                    >
-                      {activeSpeedProfile.options.map((speed) => (
-                        <option key={speed || "auto"} value={speed}>{speed ? speed.toUpperCase() : "No speed change"}</option>
-                      ))}
-                    </select>
-                  </Field>
-                </div>
-              ) : null}
-
               <div className="form-grid compact-grid">
                 <Field label={<span className="label-with-help">Bundle to LAG <HelpTip text="Enter the AE/LAG number that already exists. For ae0, enter 0. Use the same number you created in Aggregate Ethernet." /></span>}>
                   <TextInput value={activeConfig.bundleAe || ""} onChange={(event) => updateActive({ bundleAe: event.target.value, stpEdge: false, voice: { ...activeConfig.voice, enabled: false, vlan: "" } })} placeholder="AE/LAG number, for example 0 for ae0" />
@@ -1863,6 +2261,82 @@ function Interfaces({ config, setConfig, deviceSnapshot, deviceInfo }) {
           )}
         </div>
       </div>
+    </Section>
+  );
+}
+
+function SpeedSettings({ config, setConfig, deviceInfo, deviceSnapshot }) {
+  const targets = useMemo(() => speedTargets(deviceInfo, deviceSnapshot), [deviceInfo, deviceSnapshot]);
+  const settings = config.speedSettings || [];
+  const findSetting = (target) => settings.find((item) => speedSettingMatchesTarget(item, target));
+  const updateSpeed = (target, speed) => {
+    const nextItem = {
+      ...(findSetting(target) || {}),
+      profile: target.profile,
+      fpc: String(target.fpc),
+      pic: String(target.pic),
+      leadPort: Number(target.leadPort),
+      speed,
+      label: target.label,
+      modified: true
+    };
+    const nextSettings = compactSpeedSettings([
+      ...settings.filter((item) => !speedSettingMatchesTarget(item, target)),
+      nextItem
+    ]);
+    setConfig({ ...config, speedSettings: nextSettings });
+  };
+  const unsupportedMessage = deviceInfo?.ok
+    ? /^ex4400/i.test(deviceInfo.model || "")
+      ? "No supported EX4400 speed-controlled extension module is detected in PIC 2."
+      : "This model is treated as optic auto-detect or per-port capable. No manual chassis speed mode is needed here."
+    : "Connect to a switch to load model-aware speed settings.";
+
+  return (
+    <Section title="Speed Settings" icon={Cable}>
+      <div className="guidance-panel">
+        <strong>Chassis speed mode</strong>
+        <p>These controls generate chassis-level speed commands only. Use Commit Confirm when applying speed changes because affected ports may flap.</p>
+      </div>
+      {targets.length ? (
+        <DataTable columns={["Scope", "Effective Speed", "Command Target", "Status"]}>
+          {targets.map((target) => {
+            const setting = findSetting(target);
+            const value = speedForTarget(config, target);
+            const effectiveValue = value || target.defaultSpeed || "";
+            const command = target.profile === "front-group4" && effectiveValue === "10g"
+              ? `delete chassis fpc ${target.fpc} pic ${target.pic} port ${target.leadPort} speed`
+              : `set chassis fpc ${target.fpc} pic ${target.pic} port ${target.leadPort} speed ${effectiveValue || "-"}`;
+            return (
+              <tr key={target.key}>
+                <td>
+                  <strong>{target.title}</strong>
+                  <div className="muted">{target.note}</div>
+                </td>
+                <td>
+                  {target.enabled ? (
+                    <select value={value} onChange={(event) => updateSpeed(target, event.target.value)}>
+                      {target.speeds.map((speed) => (
+                        <option key={speed} value={speed}>{speed.toUpperCase()}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="muted">{value ? value.toUpperCase() : "Auto"}</span>
+                  )}
+                </td>
+                <td><code>{target.enabled ? command : "-"}</code></td>
+                <td>
+                  <span className={target.enabled ? "env-status good" : "env-status warn"}>
+                    {target.enabled ? setting?.modified === false ? "Committed" : setting?.modified ? "Pending" : "Default" : "Auto-detect"}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </DataTable>
+      ) : (
+        <div className="empty-state">{unsupportedMessage}</div>
+      )}
     </Section>
   );
 }
@@ -2259,7 +2733,9 @@ function Monitoring({ connection }) {
     { id: "arp", label: "ARP", command: "show arp" },
     { id: "dhcpBinding", label: "DHCP Bindings", command: "show dhcp server binding" },
     { id: "lacp", label: "LACP", command: "show lacp interfaces" },
-    { id: "spanningTree", label: "Spanning Tree", command: "show spanning-tree bridge" }
+    { id: "spanningTree", label: "Spanning Tree", command: "show spanning-tree bridge" },
+    { id: "virtualChassis", label: "Virtual Chassis", command: "show virtual-chassis status" },
+    { id: "lldpNeighbors", label: "LLDP Neighbors", command: "show lldp neighbors" }
   ];
   const [activeTab, setActiveTab] = useState("vlan");
   const [output, setOutput] = useState("");
@@ -3136,6 +3612,7 @@ function App() {
     monitoring: <Monitoring connection={connection} />,
     vlans: <Vlans config={config} setConfig={setCandidateConfig} />,
     interfaces: <Interfaces config={config} setConfig={setCandidateConfig} deviceSnapshot={deviceSnapshot} deviceInfo={deviceInfo} />,
+    speedSettings: <SpeedSettings config={config} setConfig={setCandidateConfig} deviceInfo={deviceInfo} deviceSnapshot={deviceSnapshot} />,
     aggregate: <AggregateEthernet config={config} setConfig={setCandidateConfig} />,
     spanningTree: <SpanningTree config={config} setConfig={setCandidateConfig} />,
     irb: <Irb config={config} setConfig={setCandidateConfig} />,

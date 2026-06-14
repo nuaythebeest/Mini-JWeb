@@ -15,7 +15,7 @@ const FQDN_OR_IP = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
 const TIME_ZONE = /^[A-Za-z_]+\/[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)?$/;
 const VC_SERIAL = /^[A-Za-z0-9_-]+$/;
 const VC_ROLES = new Set(["routing-engine", "line-card"]);
-const PORT_SPEEDS = new Set(["1g", "10g", "25g", "40g", "100g"]);
+const SPEED_PREFIX = { "1g": "ge", "10g": "xe", "25g": "et" };
 
 function irbHasDhcpServices(irb = {}) {
   return Boolean(irb.dhcpServer?.enabled || irb.dhcpRelay?.enabled);
@@ -40,6 +40,72 @@ export function ensureUnit(interfaceName) {
 
 export function stripUnit(interfaceName) {
   return String(interfaceName || "").replace(/\.\d+$/, "");
+}
+
+function physicalCoordinates(interfaceName) {
+  const match = String(stripUnit(interfaceName) || "").match(/^(ge|xe|et|mge)-(\d+)\/(\d+)\/(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  return {
+    prefix: match[1].toLowerCase(),
+    fpc: match[2],
+    pic: match[3],
+    port: Number(match[4])
+  };
+}
+
+function replaceInterfacePrefix(interfaceName, prefix) {
+  return String(interfaceName || "").replace(/^(ge|xe|et)-/i, `${prefix}-`);
+}
+
+function speedSettingKey(item = {}) {
+  return `${item.profile || ""}:${item.fpc}:${item.pic}:${item.leadPort}`;
+}
+
+function effectiveSpeedSettings(config) {
+  const byKey = new Map();
+  (config.speedSettings || []).forEach((item) => {
+    if (!item?.speed) {
+      return;
+    }
+    byKey.set(speedSettingKey(item), item);
+  });
+  return Array.from(byKey.values());
+}
+
+function speedAliasMap(config) {
+  const aliases = new Map();
+  effectiveSpeedSettings(config).forEach((item) => {
+    const speed = String(item.speed || "").toLowerCase();
+    const prefix = SPEED_PREFIX[speed];
+    const fpc = String(item.fpc ?? "");
+    const pic = String(item.pic ?? "");
+    const leadPort = Number(item.leadPort);
+    if (!prefix || !Number.isInteger(leadPort)) {
+      return;
+    }
+
+    const profile = String(item.profile || "");
+    const inferredGroup = !profile && (
+      (pic === "0" && leadPort >= 0 && leadPort <= 44 && leadPort % 4 === 0)
+      || (pic === "2" && leadPort === 0)
+    );
+    const portCount = profile === "front-group4" || profile.startsWith("ex4400-em-") || inferredGroup ? 4 : 1;
+    for (let offset = 0; offset < portCount; offset += 1) {
+      aliases.set(`${fpc}/${pic}/${leadPort + offset}`, prefix);
+    }
+  });
+  return aliases;
+}
+
+function effectiveInterfaceName(interfaceName, aliases) {
+  const coordinates = physicalCoordinates(interfaceName);
+  if (!coordinates) {
+    return stripUnit(interfaceName);
+  }
+  const prefix = aliases.get(`${coordinates.fpc}/${coordinates.pic}/${coordinates.port}`);
+  return prefix ? replaceInterfacePrefix(stripUnit(interfaceName), prefix) : stripUnit(interfaceName);
 }
 
 export function splitCsv(value) {
@@ -157,9 +223,6 @@ export function validateConfig(config) {
     if (!IFACE_NAME.test(item.name || "")) {
       errors.push(`Interface ${index + 1}: enter an EX interface such as ge-0/0/1 or xe-0/1/0.`);
     }
-    if (item.portSpeed && !PORT_SPEEDS.has(String(item.portSpeed).toLowerCase())) {
-      errors.push(`${item.name || `Interface ${index + 1}`}: port speed must be 1g, 10g, 25g, 40g, or 100g.`);
-    }
     if (item.bundleAe) {
       if (!AE_NUMBER.test(String(item.bundleAe))) {
         errors.push(`${item.name || `Interface ${index + 1}`}: aggregate bundle must be a number such as 0 for ae0.`);
@@ -215,6 +278,30 @@ export function validateConfig(config) {
     }
     if (item.voice.enabled && !vlanNames.has(item.voice.vlan)) {
       errors.push(`${item.name || `Interface ${index + 1}`}: voice VLAN must exist in the VLAN table.`);
+    }
+  });
+
+  (config.speedSettings || []).filter((item) => item.modified !== false && item.speed).forEach((item, index) => {
+    const speed = String(item.speed || "").toLowerCase();
+    const profile = String(item.profile || "");
+    const leadPort = Number(item.leadPort);
+    const label = item.label || `Speed setting ${index + 1}`;
+    const allowed = profile === "ex4400-em-4s" ? ["1g", "10g"] : ["1g", "10g", "25g"];
+
+    if (!allowed.includes(speed)) {
+      errors.push(`${label}: speed must be ${allowed.join(", ")}.`);
+    }
+    if (!/^\d+$/.test(String(item.fpc ?? "")) || !/^\d+$/.test(String(item.pic ?? ""))) {
+      errors.push(`${label}: FPC and PIC must be numeric.`);
+    }
+    if (profile === "front-group4") {
+      if (!Number.isInteger(leadPort) || leadPort < 0 || leadPort > 44 || leadPort % 4 !== 0) {
+        errors.push(`${label}: lead port must be 0, 4, 8, ... 44.`);
+      }
+    } else if (profile === "ex4400-em-4y" || profile === "ex4400-em-4s") {
+      if (String(item.pic) !== "2" || leadPort !== 0) {
+        errors.push(`${label}: EX4400 extension module speed must target PIC 2 port 0.`);
+      }
     }
   });
 
@@ -466,9 +553,10 @@ export function buildSetCommands(config) {
   const spanningTree = config.spanningTree || defaultConfig.spanningTree;
   const vlanIdByName = new Map(config.vlans.map((vlan) => [vlan.name, vlan.vlanId]));
   const vstpVlanId = (vlanName) => vlanIdByName.get(vlanName) || vlanName;
+  const aliases = speedAliasMap(config);
   const edgeInterfaces = config.interfaces
     .filter((item) => item.stpEdge && item.portType !== "l3" && item.mode === "access")
-    .map((item) => ({ ifd: stripUnit(item.name), vlan: item.accessVlan }))
+    .map((item) => ({ ifd: effectiveInterfaceName(item.name, aliases), vlan: item.accessVlan }))
     .filter((item) => item.ifd);
   const currentVlanNames = new Set(config.vlans.map((vlan) => vlan.name).filter(Boolean));
   const renamedVlanNames = new Set(
@@ -476,7 +564,7 @@ export function buildSetCommands(config) {
       .filter((vlan) => vlan.previousName && vlan.previousName !== vlan.name)
       .map((vlan) => vlan.previousName)
   );
-  const currentInterfaceNames = new Set(config.interfaces.map((item) => stripUnit(item.name)).filter(Boolean));
+  const currentInterfaceNames = new Set(config.interfaces.map((item) => effectiveInterfaceName(item.name, aliases)).filter(Boolean));
   const currentAggregateNames = new Set((config.aggregate?.interfaces || []).map((item) => aeName(item.number)).filter(Boolean));
   const baselineInterfaceNames = new Set(config.baseline?.interfaces || []);
   const virtualChassis = config.virtualChassis || defaultConfig.virtualChassis;
@@ -557,7 +645,7 @@ export function buildSetCommands(config) {
   });
 
   config.interfaces.filter((item) => item.modified !== false).forEach((item) => {
-    const ifd = stripUnit(item.name);
+    const ifd = effectiveInterfaceName(item.name, aliases);
     const ifl = ensureUnit(ifd);
     const unit = (item.portType || "l2") === "l3" ? String(item.unit || "0") : "0";
 
@@ -780,25 +868,25 @@ export function buildSetCommands(config) {
     }
   }
 
-  config.interfaces.filter((item) => item.modified !== false && item.portSpeed).forEach((item) => {
-    const match = String(item.name || "").match(/^[a-z]+-(\d+)\/(\d+)\/(\d+)/i);
-    if (!match) {
+  (config.speedSettings || []).filter((item) => item.modified !== false && item.speed).forEach((item) => {
+    const speed = String(item.speed || "").toLowerCase();
+    const profile = String(item.profile || "");
+    const fpc = String(item.fpc ?? "");
+    const pic = String(item.pic ?? "");
+    const leadPort = Number(item.leadPort);
+    if (!Number.isInteger(leadPort)) {
       return;
     }
-    const [, fpc, pic, port] = match;
-    const speed = String(item.portSpeed).toLowerCase();
-    const portNumber = Number(port);
-    const groupedSpeed = String(item.speedProfile || "").includes("group4")
-      && Number.isInteger(portNumber)
-      && portNumber >= 0
-      && portNumber <= 47
-      && ["1g", "10g", "25g"].includes(speed);
-    const targetPorts = groupedSpeed
-      ? Array.from({ length: 4 }, (_unused, offset) => Math.floor(portNumber / 4) * 4 + offset)
-      : [portNumber];
-    targetPorts.forEach((targetPort) => {
-      commands.push(`set chassis fpc ${fpc} pic ${pic} port ${targetPort} speed ${speed}`);
-    });
+    if (profile === "front-group4" && ["1g", "10g", "25g"].includes(speed)) {
+      commands.push(speed === "10g"
+        ? `delete chassis fpc ${fpc} pic ${pic} port ${leadPort} speed`
+        : `set chassis fpc ${fpc} pic ${pic} port ${leadPort} speed ${speed}`);
+      return;
+    }
+    if ((profile === "ex4400-em-4y" || profile === "ex4400-em-4s")
+      && (profile === "ex4400-em-4s" ? ["1g", "10g"] : ["1g", "10g", "25g"]).includes(speed)) {
+      commands.push(`set chassis fpc ${fpc} pic ${pic} port 0 speed ${speed}`);
+    }
   });
 
   if (config.management.modified !== false && config.management.enabled) {
@@ -887,7 +975,11 @@ export function configFromSnapshot(snapshot, previousConfig = defaultConfig) {
   const physicalInterfaces = Array.from(
     new Map((snapshot.configuredInterfaces || []).map((item) => [item.physicalName || stripUnit(item.name), item])).values()
   );
-  const baselineInterfaces = Array.from(new Set(physicalInterfaces.map((item) => item.physicalName || stripUnit(item.name))));
+  const baselineInterfaces = Array.from(new Set(
+    physicalInterfaces
+      .filter((item) => !item.physicalOnly)
+      .map((item) => item.physicalName || stripUnit(item.name))
+  ));
   const edgeInterfaces = new Set(snapshot.stpEdgeInterfaces || []);
   const aggregateInterfaces = (snapshot.aggregateInterfaces || []).map(aggregateFromSnapshot);
   const baselineAggregateInterfaces = Array.from(new Set(aggregateInterfaces.map((item) => aeName(item.number)).filter(Boolean)));
@@ -914,6 +1006,7 @@ export function configFromSnapshot(snapshot, previousConfig = defaultConfig) {
       modified: false
     })),
     staticRoutes: parseStaticRoutes(snapshot.staticRoutesText),
+    speedSettings: (snapshot.chassisSpeedSettings || []).map((item) => ({ ...item, modified: false })),
     management: {
       ...(previousConfig.management || defaultConfig.management),
       ...(snapshot.management || {}),
@@ -950,6 +1043,7 @@ export const defaultConfig = {
   interfaces: [],
   irbs: [],
   staticRoutes: [],
+  speedSettings: [],
   management: {
     enabled: false,
     interfaceName: "me0",
